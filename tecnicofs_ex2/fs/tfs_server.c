@@ -44,6 +44,14 @@ int clear_session(int session_id) {
     return -1;
 }
 
+void delete_pipes(int session_id){
+    for (int i=0; i!=MAX_SESSIONS; i++){
+        if (client_info[i].session_id!=-1 && i!=session_id){
+            unlink(client_info[i].fifo_path);
+        }
+    }
+}
+
 int write_pipe(int session_client){
     for(int i=0; i<MAX_SESSIONS; i++){
         if (client_info[i].session_id==session_client){
@@ -145,10 +153,26 @@ int server_close(char const* buffer){
     int int_fh = atoi(fhandle);
     int session_id = atoi(session_client);
 
-    printf("%d\n", session_id);
-    printf("%d\n", int_fh);
-
     return_value = tfs_close(int_fh);
+
+    pipe_to_write = write_pipe(session_id);
+
+    if (write(pipe_to_write, &return_value, sizeof(int))==-1)
+        return -1;
+    return 0;
+}
+
+int server_shutdown(char const* buffer){
+    int i=0, pipe_to_write =0;
+    char session_client[sizeof(int)];
+    for (i=2; buffer[i]!='|'; i++){
+        session_client[i-2]=buffer[i];
+    }
+    session_client[i-2]='\0';
+    int session_id = atoi(session_client);
+
+    delete_pipes(session_id);
+    int return_value = tfs_destroy_after_all_closed();
 
     pipe_to_write = write_pipe(session_id);
 
@@ -202,6 +226,13 @@ int main(int argc, char **argv) {
                 if (server_close(buffer) == -1){
                     return -1;
                 }
+                break;
+            case '7':
+                if (server_shutdown(buffer)== 0){
+                    unlink(pipename);
+                    return 0;
+                }
+                return -1;
                 break;
             default:
                 return -1;

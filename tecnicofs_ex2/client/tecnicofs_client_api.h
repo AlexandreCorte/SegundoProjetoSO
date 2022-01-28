@@ -13,8 +13,8 @@
 
 #define MAX_PATH_SIZE 40
 
-int file_server_path;
-int file_client_path;
+int file_server_handle;
+int file_client_handle;
 char fifo_client_path[MAX_PATH_SIZE];
 int session_id;
 

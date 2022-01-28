@@ -19,21 +19,21 @@ int tfs_mount(char const *client_pipe_path, char const *server_pipe_path) {
     if (fd_server_path==-1)
         return -1;
 
-    file_server_path = fd_server_path; //copy server fd
+    file_server_handle = fd_server_path; //copy server fd
 
     char msg[sizeof(client_path)+sizeof(op_code)+3]; //create buffer
     
     sprintf(msg, "%c|%s|", op_code, client_path);
 
-    if (write(file_server_path, msg, sizeof(msg))==-1) //write msg to server fifo
+    if (write(file_server_handle, msg, sizeof(msg))==-1) //write msg to server fifo
         return -1;
 
     int fd_client_path = open(client_path, O_RDONLY); //open client fifo to read
     if (fd_client_path==-1)
         return -1;
-    file_client_path = fd_client_path; //save client fifo fd
+    file_client_handle = fd_client_path; //save client fifo fd
 
-    if (read(file_client_path, &session_client, sizeof(int))==-1) //read session id
+    if (read(file_client_handle, &session_client, sizeof(int))==-1) //read session id
         return -1;
     session_id = session_client; //save session_id
 
@@ -48,13 +48,13 @@ int tfs_unmount() {
 
     sprintf(msg, "%c|%d|", op_code, session_id);
 
-    if (write(file_server_path, msg, sizeof(msg))==-1)
+    if (write(file_server_handle, msg, sizeof(msg))==-1)
         return -1;
-    if (read(file_client_path, &return_value, sizeof(int))==-1)
+    if (read(file_client_handle, &return_value, sizeof(int))==-1)
         return -1;
-    if (close(file_client_path)==-1)
+    if (close(file_client_handle)==-1)
         return -1;
-    if (close(file_server_path)==-1)
+    if (close(file_server_handle)==-1)
         return -1;
     if (unlink(fifo_client_path)==-1)
         return -1;
@@ -76,10 +76,10 @@ int tfs_open(char const*name, int flags){
     
     sprintf(msg, "%c|%d|%s|%d|", op_code, session_id, file_name, flags);
     
-    if (write(file_server_path, msg, sizeof(msg))==-1)
+    if (write(file_server_handle, msg, sizeof(msg))==-1)
         return -1;
 
-    if (read(file_client_path, &return_value, sizeof(int))==-1)
+    if (read(file_client_handle, &return_value, sizeof(int))==-1)
         return -1;
 
     return return_value;
@@ -93,13 +93,31 @@ int tfs_close(int fhandle){
 
     sprintf(msg, "%c|%d|%d|", op_code, session_id, fhandle);
 
-    if (write(file_server_path, msg, sizeof(msg))==-1)
+    if (write(file_server_handle, msg, sizeof(msg))==-1)
         return -1;
 
-    if (read(file_client_path, &return_value, sizeof(int))==-1)
+    if (read(file_client_handle, &return_value, sizeof(int))==-1)
         return -1;
 
-    printf("%d\n", return_value);
+    return return_value;
+}
 
+int tfs_shutdown_after_all_closed(){
+    char op_code = TFS_OP_CODE_SHUTDOWN_AFTER_ALL_CLOSED + '0';
+    int return_value;
+
+    char msg[sizeof(op_code)+sizeof(session_id)+3];
+
+    sprintf(msg, "%c|%d|", op_code, session_id);
+
+    printf("%s\n", msg);
+
+    if (write(file_server_handle, msg, sizeof(msg))==-1)
+        return -1;
+
+    if (read(file_client_handle, &return_value, sizeof(int))==-1)
+        return -1;
+
+    unlink(fifo_client_path);
     return return_value;
 }
