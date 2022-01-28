@@ -102,6 +102,25 @@ int tfs_close(int fhandle){
     return return_value;
 }
 
+ssize_t tfs_write(int fhandle, void const *buffer, size_t len){
+    char op_code = TFS_OP_CODE_WRITE + '0';
+    int return_value;
+    unsigned int size = (unsigned int)len;
+
+    char msg[sizeof(op_code)+sizeof(session_id)+sizeof(fhandle)+sizeof(len)+size+6];
+    
+    sprintf(msg, "%c|%d|%d|%d|%s|", op_code, session_id, fhandle, (int)len, (char*)buffer);
+
+    if (write(file_server_handle, msg, sizeof(msg))==-1)
+        return -1;
+
+    if (read(file_client_handle, &return_value, sizeof(int))==-1)
+        return -1;
+
+    return (ssize_t)return_value;
+
+}
+
 int tfs_shutdown_after_all_closed(){
     char op_code = TFS_OP_CODE_SHUTDOWN_AFTER_ALL_CLOSED + '0';
     int return_value;
@@ -109,8 +128,6 @@ int tfs_shutdown_after_all_closed(){
     char msg[sizeof(op_code)+sizeof(session_id)+3];
 
     sprintf(msg, "%c|%d|", op_code, session_id);
-
-    printf("%s\n", msg);
 
     if (write(file_server_handle, msg, sizeof(msg))==-1)
         return -1;

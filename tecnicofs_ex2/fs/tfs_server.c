@@ -146,7 +146,7 @@ int server_close(char const* buffer){
     }
     session_client[i-2]='\0';
     i++;
-    for (j=0; buffer[i]!='|'; i++){
+    for (j=0; buffer[i]!='|'; i++, j++){
         fhandle[j]=buffer[i];
     }
     fhandle[j]='\0';
@@ -158,6 +158,53 @@ int server_close(char const* buffer){
     pipe_to_write = write_pipe(session_id);
 
     if (write(pipe_to_write, &return_value, sizeof(int))==-1)
+        return -1;
+    return 0;
+}
+
+int server_write(char const* buffer){
+    int i=0, j=0, k=0, a=0, pipe_to_write=0;
+    char session_client[sizeof(int)];
+    char size[sizeof(size_t)];
+    char fhandle[sizeof(int)];
+
+    for (i=2; buffer[i]!='|'; i++){
+        session_client[i-2]=buffer[i];
+    }
+    session_client[i-2]='\0';
+    i++;
+
+    for (j=0; buffer[i]!='|'; i++, j++){
+        fhandle[j]=buffer[i];
+    }
+    fhandle[j]='\0';
+    i++;
+
+    for (k=0; buffer[i]!='|'; i++, k++){
+        size[k]=buffer[i];
+    }
+    size[k]='\0';
+    i++;
+
+    int session_id = atoi(session_client);
+    int size_int = atoi(size);
+    int file_handle = atoi(fhandle);
+
+    char buffer_to_write[size_int];
+    for (a=0; buffer[i]!='|'; i++, a++){
+        buffer_to_write[a]=buffer[i];
+    }
+    buffer_to_write[a]='\0';
+
+    size_t size_to_write = (size_t)size_int;
+
+    ssize_t return_value = tfs_write(file_handle, buffer_to_write, size_to_write);
+
+    pipe_to_write = write_pipe(session_id);
+
+    int return_int = (int)return_value;
+
+    if (write(pipe_to_write, &return_int, sizeof(int))==-1)
         return -1;
     return 0;
 }
@@ -198,6 +245,7 @@ int main(int argc, char **argv) {
     int fd = open(pipename, O_RDONLY);
     if (fd == -1)
         return -1;
+        
     while (1) {
         memset(buffer, '\0', 2048);
         ssize_t bytes_read = read(fd, buffer, sizeof(buffer) - 1);
@@ -224,6 +272,11 @@ int main(int argc, char **argv) {
                 break;
             case '4':
                 if (server_close(buffer) == -1){
+                    return -1;
+                }
+                break;
+            case '5':
+                if (server_write(buffer) == -1){
                     return -1;
                 }
                 break;
