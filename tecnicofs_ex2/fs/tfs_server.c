@@ -209,6 +209,51 @@ int server_write(char const* buffer){
     return 0;
 }
 
+int server_read(char const* buffer){
+    int i=0, j=0, k=0, pipe_to_write=0;
+    char session_client[sizeof(int)];
+    char size[sizeof(size_t)];
+    char fhandle[sizeof(int)];
+
+    for (i=2; buffer[i]!='|'; i++){
+        session_client[i-2]=buffer[i];
+    }
+    session_client[i-2]='\0';
+    i++;
+
+    for (j=0; buffer[i]!='|'; i++, j++){
+        fhandle[j]=buffer[i];
+    }
+    fhandle[j]='\0';
+    i++;
+
+    for (k=0; buffer[i]!='|'; i++, k++){
+        size[k]=buffer[i];
+    }
+    size[k]='\0';
+
+    int session_id = atoi(session_client);
+    int size_int = atoi(size);
+    int file_handle = atoi(fhandle); 
+
+ //safe
+    char buffer_to_read[size_int];   
+
+    size_t size_to_read = (size_t)size_int;
+
+    ssize_t return_value = tfs_read(file_handle, buffer_to_read, size_to_read);
+
+    char output[size_to_read + sizeof(size_to_read)+3];
+
+    sprintf(output, "%ld|%s|", return_value, buffer_to_read);
+
+    pipe_to_write = write_pipe(session_id);
+
+    if (write(pipe_to_write, output, sizeof(output))==-1)
+        return -1;
+    return 0;
+}
+
 int server_shutdown(char const* buffer){
     int i=0, pipe_to_write =0;
     char session_client[sizeof(int)];
@@ -277,6 +322,11 @@ int main(int argc, char **argv) {
                 break;
             case '5':
                 if (server_write(buffer) == -1){
+                    return -1;
+                }
+                break;
+            case '6':
+                if (server_read(buffer) == -1){
                     return -1;
                 }
                 break;

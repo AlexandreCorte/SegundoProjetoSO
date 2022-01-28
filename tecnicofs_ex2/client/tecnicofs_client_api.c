@@ -121,6 +121,36 @@ ssize_t tfs_write(int fhandle, void const *buffer, size_t len){
 
 }
 
+ssize_t tfs_read(int fhandle, void*buffer, size_t len){
+    char op_code = TFS_OP_CODE_READ + '0';
+    int i=0;
+    unsigned int size = (unsigned int)len;
+    char return_value[sizeof(int)];
+
+    char output[size + sizeof(len)+3];
+    char msg[sizeof(op_code)+sizeof(session_id)+sizeof(fhandle)+sizeof(len)+5];
+    
+    sprintf(msg, "%c|%d|%d|%d|", op_code, session_id, fhandle, (int)len);
+
+    if (write(file_server_handle, msg, sizeof(msg))==-1)
+        return -1;
+
+    if (read(file_client_handle, output, sizeof(output))==-1)
+        return -1;
+
+    for (i=0; output[i]!='|'; i++){
+        return_value[i]=output[i];
+    }
+    return_value[i]='\0';
+    i++;
+
+    memcpy(buffer, output+i, len);
+
+    int return_int = atoi(return_value);
+
+    return return_int;
+}
+
 int tfs_shutdown_after_all_closed(){
     char op_code = TFS_OP_CODE_SHUTDOWN_AFTER_ALL_CLOSED + '0';
     int return_value;
