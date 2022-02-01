@@ -12,6 +12,7 @@ int tfs_mount(char const *client_pipe_path, char const *server_pipe_path) {
     memcpy(server_path, server_pipe_path, sizeof(server_path)); // \0 in server path
     memcpy(fifo_client_path, client_pipe_path, sizeof(fifo_client_path)); //save client fifo path
 
+    unlink(client_path);
     if (mkfifo(client_path, 0777)==-1) //create client fifo
         return -1;
 

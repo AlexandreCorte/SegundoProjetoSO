@@ -11,6 +11,7 @@
 typedef struct client {
     int session_id;
     char fifo_path[MAX_PATH_SIZE];
+    int file_descriptor;
 } client;
 
 client client_info[MAX_SESSIONS];
@@ -19,14 +20,16 @@ void struct_init() {
     for (int i = 0; i != MAX_SESSIONS; i++) {
         client_info[i].session_id = -1;
         memset(client_info[i].fifo_path, '\0', sizeof(client_info[i].fifo_path));
+        client_info[i].file_descriptor=-1;
     }
 }
 
-int create_session(char *client_path_name) {
+int create_session(char *client_path_name, int fd) {
     for (int i = 0; i != MAX_SESSIONS; i++) {
         if (client_info[i].session_id == -1) {
             client_info[i].session_id = i;
             memcpy(client_info[i].fifo_path, client_path_name, sizeof(client_info[i].fifo_path));
+            client_info[i].file_descriptor = fd;
             return i;
         }
     }
@@ -38,7 +41,7 @@ int clear_session(int session_id) {
         if (session_id == client_info[i].session_id) {
             client_info[i].session_id = -1;
             memset(client_info[i].fifo_path, '\0', sizeof(client_info[i].fifo_path));
-            return 0;
+            return client_info[i].file_descriptor;
         }
     }
     return -1;
@@ -58,10 +61,7 @@ int write_pipe(int session_client){
             char client_path[MAX_PATH_SIZE];
             memset(client_path, '\0', MAX_PATH_SIZE);
             memcpy(client_path, client_info[i].fifo_path, sizeof(client_info[i].fifo_path));
-            int fd = open(client_path, O_WRONLY);
-            if (fd==-1)
-                return -1;
-            return fd;
+            return client_info[i].file_descriptor;
         }
     }
     return -1;
@@ -76,14 +76,16 @@ int server_mount(char const* buffer) {
     }
     client_path_name[i-2]='\0';
     
-    int session_id = create_session(client_path_name);
-    if (session_id==-1){
-        return -1;
-    }
     int fd = open(client_path_name, O_WRONLY);
     if (fd == -1){
         return -1;
     }
+
+    int session_id = create_session(client_path_name, fd);
+    if (session_id==-1){
+        return -1;
+    }
+
     if (write(fd, &session_id, sizeof(int)) == -1){
         return -1;
     }
@@ -100,8 +102,15 @@ int server_unmount(char const* buffer) {
     int session = atoi(session_id);
     int pipe_to_write = write_pipe(session);
     int return_value = clear_session(session);
+    if (return_value!=-1){
+        return_value=0;
+    }
     if (write(pipe_to_write, &return_value, sizeof(int))==-1)
         return -1;
+    if (return_value!=-1){
+        if (close(return_value)==-1)
+            return -1;
+    }
     return 0;
 }
 
@@ -284,6 +293,7 @@ int main(int argc, char **argv) {
 
     char *pipename = argv[1];
     printf("Starting TecnicoFS server with pipe called %s\n", pipename);
+    unlink(pipename);
     if (mkfifo(pipename, 0777) == -1)
         return -1;
 
