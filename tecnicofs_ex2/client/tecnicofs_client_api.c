@@ -132,7 +132,6 @@ ssize_t tfs_read(int fhandle, void*buffer, size_t len){
     char msg[sizeof(op_code)+sizeof(session_id)+sizeof(fhandle)+sizeof(len)+5];
     
     sprintf(msg, "%c|%d|%d|%d|", op_code, session_id, fhandle, (int)len);
-
     if (write(file_server_handle, msg, sizeof(msg))==-1)
         return -1;
 
