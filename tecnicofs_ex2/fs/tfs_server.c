@@ -10,77 +10,42 @@
 #define MAX_SESSIONS 20
 #define MAX_PATH_SIZE 40
 
+#define SIZE_OF_OPCODE 1
 #define SIZE_OF_SESSION_ID 3
-#define SIZE_OF_LENGTH 4
 #define SIZE_OF_FHANDLE 4
+#define SIZE_OF_LENGTH 4
 #define SIZE_OF_FLAGS 1
 #define MAX_TASKS 5
+#define BLOCK_TASK 1200
+
+#define FREE 0
+#define TAKEN 1
 
 typedef struct client {
     int session_id;
     char fifo_path[MAX_PATH_SIZE];
     int file_descriptor;
-    int count; // vai de 0 a 4
+    int count;       // vai de 0 a 4
     int prodcounter; // vai de 0 a 4
     int conscounter; // vai de 0 a 4
     pthread_mutex_t mutex;
     pthread_cond_t podeConsumir;
     pthread_cond_t podeProduzir;
     pthread_t thread;
-    char buffer[1200 * MAX_TASKS];
+    char buffer[BLOCK_TASK * MAX_TASKS];
+    int state;
 } client;
 
 client client_info[MAX_SESSIONS];
 
-void *consumidor(void *session) {
-    int session_id = *(int *)session;
-    while (1) {
-        if (pthread_mutex_lock(&client_info[session_id].mutex) == -1)
-            exit(1);
-        while (client_info[session_id].count == 0)
-            if (pthread_cond_wait(&client_info[session_id].podeConsumir,
-                                  &client_info[session_id].mutex) == -1)
-                exit(1);
-        client_info[session_id].conscounter++;
-        if (client_info[session_id].conscounter == MAX_TASKS) {
-            client_info[session_id].conscounter = 0;
-        }
-        client_info[session_id].count--;
-        if (pthread_cond_signal(&client_info[session_id].podeProduzir)==-1)
-            exit(1);
-        if (pthread_mutex_unlock(&client_info[session_id].mutex)==-1)
-            exit(1);
-    }
-}
-
-void struct_init() {
-    for (int i = 0; i != MAX_SESSIONS; i++) {
-        client_info[i].session_id = -1;
-        memset(client_info[i].fifo_path, '\0',
-               sizeof(client_info[i].fifo_path));
-        client_info[i].file_descriptor = -1;
-        client_info[i].count = 0;
-        client_info[i].conscounter = 0;
-        client_info[i].prodcounter = 0;
-        if (pthread_mutex_init(&client_info[i].mutex, NULL) == -1)
-            exit(1);
-        if (pthread_cond_init(&client_info[i].podeConsumir, NULL) == -1)
-            exit(1);
-        if (pthread_cond_init(&client_info[i].podeProduzir, NULL) == -1)
-            exit(1);
-        if (pthread_create(&client_info[i].thread, NULL, consumidor,
-                           &client_info[i].session_id) == -1)
-            exit(1);
-    }
-}
 
 int create_session(char *client_path_name, int fd) {
     for (int i = 0; i != MAX_SESSIONS; i++) {
-        if (client_info[i].session_id == -1) {
-            client_info[i].session_id = i;
+        if (client_info[i].state == FREE) {
             memcpy(client_info[i].fifo_path, client_path_name,
                    sizeof(client_info[i].fifo_path));
             client_info[i].file_descriptor = fd;
+            client_info[i].state = TAKEN;
             return i;
         }
     }
@@ -90,7 +55,7 @@ int create_session(char *client_path_name, int fd) {
 int clear_session(int session_id) {
     for (int i = 0; i != MAX_SESSIONS; i++) {
         if (session_id == client_info[i].session_id) {
-            client_info[i].session_id = -1;
+            client_info[i].state = FREE;
             memset(client_info[i].fifo_path, '\0',
                    sizeof(client_info[i].fifo_path));
             return client_info[i].file_descriptor;
@@ -101,7 +66,7 @@ int clear_session(int session_id) {
 
 void delete_pipes(int session_id) {
     for (int i = 0; i != MAX_SESSIONS; i++) {
-        if (client_info[i].session_id != -1 && i != session_id) {
+        if (client_info[i].state == TAKEN && i != session_id) {
             unlink(client_info[i].fifo_path);
         }
     }
@@ -170,7 +135,7 @@ void read_buffer(int fd, char buffer[], size_t size) {
 
 void read_flags(int fd, char *flags) {
     ssize_t command_bytes_read = 0;
-    command_bytes_read = read(fd, flags, 1);
+    command_bytes_read = read(fd, flags, SIZE_OF_FLAGS);
     if (command_bytes_read == -1)
         exit(1);
 }
@@ -212,16 +177,15 @@ int server_unmount(char const *session_id) {
     return 0;
 }
 
-int server_open(char const *session_id, char const *filename, char flags) {
+int server_open(int session_id, char const *filename, char flags) {
     char file_name[MAX_PATH_SIZE];
-    int flag, fd, session_client, pipe_to_write;
+    int flag, fd, pipe_to_write;
 
     memset(file_name, '\0', sizeof(file_name));
 
     memcpy(file_name, filename, sizeof(file_name));
     flag = flags + '0';
-    session_client = atoi(session_id);
-    pipe_to_write = write_pipe(session_client);
+    pipe_to_write = write_pipe(session_id);
     if (pipe_to_write == -1)
         return -1;
 
@@ -233,15 +197,14 @@ int server_open(char const *session_id, char const *filename, char flags) {
     return 0;
 }
 
-int server_close(char const *session_id, char const *fhandle) {
+int server_close(int session_id, char const *fhandle) {
     int return_value = 0, pipe_to_write;
 
     int int_fh = atoi(fhandle);
-    int session_client = atoi(session_id);
 
     return_value = tfs_close(int_fh);
 
-    pipe_to_write = write_pipe(session_client);
+    pipe_to_write = write_pipe(session_id);
     if (pipe_to_write == -1)
         return -1;
 
@@ -252,11 +215,10 @@ int server_close(char const *session_id, char const *fhandle) {
     return 0;
 }
 
-int server_write(char const *session_client, char const *fhandle,
+int server_write(int session_id, char const *fhandle,
                  char const *size, char const *buffer) {
     int pipe_to_write = 0;
 
-    int session_id = atoi(session_client);
     int file_handle = atoi(fhandle);
     size_t size_to_write = (size_t)atoi(size);
 
@@ -275,11 +237,9 @@ int server_write(char const *session_client, char const *fhandle,
     return 0;
 }
 
-int server_read(char const *session_client, char const *fhandle,
+int server_read(int session_id, char const *fhandle,
                 char const *size) {
     int pipe_to_write = 0;
-
-    int session_id = atoi(session_client);
     int size_int = atoi(size);
     int file_handle = atoi(fhandle);
 
@@ -318,6 +278,90 @@ int server_shutdown(char const *session_client) {
         return -1;
     }
     return 0;
+}
+
+void *consumidor(void *session) {
+    int session_id = *(int *)session;
+    while (1) {
+        if (pthread_mutex_lock(&client_info[session_id].mutex) == -1)
+            exit(1);
+        while (client_info[session_id].count == 0){
+            if (pthread_cond_wait(&client_info[session_id].podeConsumir,
+                                  &client_info[session_id].mutex)==-1)
+                                exit(1);
+        }
+        int offset = client_info[session_id].conscounter * BLOCK_TASK;
+        char opcode;
+
+        memcpy(&opcode, client_info[session_id].buffer+offset, SIZE_OF_OPCODE);
+        if (opcode == '3'){
+            char filename[MAX_FILE_NAME+1];
+            char flags;
+            memset(filename, '\0', MAX_FILE_NAME+1);
+            memcpy(filename, client_info[session_id].buffer+offset+SIZE_OF_OPCODE, MAX_FILE_NAME);
+            memcpy(&flags, client_info[session_id].buffer+offset+SIZE_OF_OPCODE+MAX_FILE_NAME, SIZE_OF_FLAGS);
+            server_open(session_id, filename, flags);
+        }
+        if (opcode == '4'){
+            char fhandle[SIZE_OF_FHANDLE+1];
+            memset(fhandle, '\0', SIZE_OF_FHANDLE+1);
+            memcpy(fhandle, client_info[session_id].buffer+offset+SIZE_OF_OPCODE, SIZE_OF_FHANDLE);
+            server_close(session_id, fhandle);
+        }
+        if (opcode == '5'){
+            char fhandle[SIZE_OF_FHANDLE+1];
+            char size[SIZE_OF_LENGTH+1];
+            memset(fhandle, '\0', SIZE_OF_FHANDLE+1);
+            memset(size, '\0', SIZE_OF_LENGTH+1);
+            memcpy(fhandle, client_info[session_id].buffer+offset+SIZE_OF_OPCODE, SIZE_OF_FHANDLE);
+            memcpy(size, client_info[session_id].buffer+offset+SIZE_OF_OPCODE+SIZE_OF_FHANDLE, SIZE_OF_LENGTH);
+            size_t size_of_buffer = (size_t)atoi(size);
+            char buffer_to_write[size_of_buffer+1];
+            memset(buffer_to_write, '\0', size_of_buffer+1);
+            memcpy(buffer_to_write, client_info[session_id].buffer+offset+SIZE_OF_OPCODE+SIZE_OF_FHANDLE+SIZE_OF_LENGTH, size_of_buffer);
+            server_write(session_id, fhandle, size, buffer_to_write);
+        }
+        if (opcode == '6'){
+            char fhandle[SIZE_OF_FHANDLE+1];
+            char size[SIZE_OF_LENGTH+1];
+            memset(fhandle, '\0', SIZE_OF_FHANDLE+1);
+            memset(size, '\0', SIZE_OF_LENGTH+1);
+            memcpy(fhandle, client_info[session_id].buffer+offset+SIZE_OF_OPCODE, SIZE_OF_FHANDLE);
+            memcpy(size, client_info[session_id].buffer+offset+SIZE_OF_OPCODE+SIZE_OF_FHANDLE, SIZE_OF_LENGTH);
+            server_read(session_id, fhandle, size);
+        }
+        client_info[session_id].conscounter++;
+        if (client_info[session_id].conscounter == MAX_TASKS) {
+            client_info[session_id].conscounter = 0;
+        }
+        client_info[session_id].count--;
+        if (pthread_cond_signal(&client_info[session_id].podeProduzir) == -1)
+            exit(1);
+        if (pthread_mutex_unlock(&client_info[session_id].mutex) == -1)
+            exit(1);
+    }
+}
+
+void struct_init() {
+    for (int i = 0; i != MAX_SESSIONS; i++) {
+        client_info[i].session_id = i;
+        client_info[i].state = FREE;
+        memset(client_info[i].fifo_path, '\0',
+               sizeof(client_info[i].fifo_path));
+        client_info[i].file_descriptor = -1;
+        client_info[i].count = 0;
+        client_info[i].conscounter = 0;
+        client_info[i].prodcounter = 0;
+        if (pthread_mutex_init(&client_info[i].mutex, NULL) == -1)
+            exit(1);
+        if (pthread_cond_init(&client_info[i].podeConsumir, NULL) == -1)
+            exit(1);
+        if (pthread_cond_init(&client_info[i].podeProduzir, NULL) == -1)
+            exit(1);
+        if (pthread_create(&client_info[i].thread, NULL, consumidor,
+                           &client_info[i].session_id) == -1)
+            exit(1);
+    }
 }
 
 int main(int argc, char **argv) {
@@ -374,18 +418,25 @@ int main(int argc, char **argv) {
                 while (client_info[session_client].count == MAX_TASKS)
                     pthread_cond_wait(&client_info[session_client].podeProduzir,
                                       &client_info[session_client].mutex);
+                int offset =
+                    client_info[session_client].prodcounter * BLOCK_TASK;
                 if (opcode == '3') {
                     read_filename(fd, filename);
                     read_flags(fd, &flags);
-                    if (server_open(session_id, filename, flags) == -1) {
-                        return -1;
-                    }
+                    memcpy(client_info[session_client].buffer + offset, &opcode,
+                           SIZE_OF_OPCODE);
+                    memcpy(client_info[session_client].buffer + offset + SIZE_OF_OPCODE,
+                           filename, MAX_FILE_NAME);
+                    memcpy(client_info[session_client].buffer + offset + SIZE_OF_OPCODE +
+                               MAX_FILE_NAME,
+                           &flags, SIZE_OF_FLAGS);
                 }
                 if (opcode == '4') {
                     read_fhandle(fd, fhandle);
-                    if (server_close(session_id, fhandle) == -1) {
-                        return -1;
-                    }
+                    memcpy(client_info[session_client].buffer + offset, &opcode,
+                           SIZE_OF_OPCODE);
+                    memcpy(client_info[session_client].buffer + offset + SIZE_OF_OPCODE,
+                           fhandle, SIZE_OF_FHANDLE);
                 }
                 if (opcode == '5') {
                     read_fhandle(fd, fhandle);
@@ -393,18 +444,28 @@ int main(int argc, char **argv) {
                     size_t size_of_buffer = (size_t)atoi(size);
                     char *buffer_to_write = (char *)malloc(size_of_buffer + 1);
                     read_buffer(fd, buffer_to_write, size_of_buffer);
-                    if (server_write(session_id, fhandle, size,
-                                     buffer_to_write) == -1) {
-                        return -1;
-                    }
+                    memcpy(client_info[session_client].buffer + offset, &opcode,
+                           SIZE_OF_OPCODE);
+                    memcpy(client_info[session_client].buffer + offset + SIZE_OF_OPCODE,
+                           fhandle, SIZE_OF_FHANDLE);
+                    memcpy(client_info[session_client].buffer + offset + SIZE_OF_OPCODE+
+                               SIZE_OF_FHANDLE,
+                           size, SIZE_OF_LENGTH);
+                    memcpy(client_info[session_client].buffer + offset + SIZE_OF_OPCODE +
+                               SIZE_OF_FHANDLE + SIZE_OF_LENGTH,
+                           buffer_to_write, size_of_buffer);
                     free(buffer_to_write);
                 }
                 if (opcode == '6') {
                     read_fhandle(fd, fhandle);
                     read_size(fd, size);
-                    if (server_read(session_id, fhandle, size) == -1) {
-                        return -1;
-                    }
+                    memcpy(client_info[session_client].buffer + offset, &opcode,
+                           SIZE_OF_OPCODE);
+                    memcpy(client_info[session_client].buffer + offset + SIZE_OF_OPCODE,
+                           fhandle, SIZE_OF_FHANDLE);
+                    memcpy(client_info[session_client].buffer + offset + SIZE_OF_OPCODE +
+                               SIZE_OF_FHANDLE,
+                           size, SIZE_OF_LENGTH);
                 }
                 client_info[session_client].prodcounter++;
                 if (client_info[session_client].prodcounter == MAX_TASKS)
