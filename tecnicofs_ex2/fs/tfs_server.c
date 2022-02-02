@@ -1,5 +1,6 @@
 #include "operations.h"
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -13,20 +14,63 @@
 #define SIZE_OF_LENGTH 4
 #define SIZE_OF_FHANDLE 4
 #define SIZE_OF_FLAGS 1
+#define MAX_TASKS 5
 
 typedef struct client {
     int session_id;
     char fifo_path[MAX_PATH_SIZE];
     int file_descriptor;
+    int count; // vai de 0 a 4
+    int prodcounter; // vai de 0 a 4
+    int conscounter; // vai de 0 a 4
+    pthread_mutex_t mutex;
+    pthread_cond_t podeConsumir;
+    pthread_cond_t podeProduzir;
+    pthread_t thread;
+    char buffer[1200 * MAX_TASKS];
 } client;
 
 client client_info[MAX_SESSIONS];
 
+void *consumidor(void *session) {
+    int session_id = *(int *)session;
+    while (1) {
+        if (pthread_mutex_lock(&client_info[session_id].mutex) == -1)
+            exit(1);
+        while (client_info[session_id].count == 0)
+            if (pthread_cond_wait(&client_info[session_id].podeConsumir,
+                                  &client_info[session_id].mutex) == -1)
+                exit(1);
+        client_info[session_id].conscounter++;
+        if (client_info[session_id].conscounter == MAX_TASKS) {
+            client_info[session_id].conscounter = 0;
+        }
+        client_info[session_id].count--;
+        if (pthread_cond_signal(&client_info[session_id].podeProduzir)==-1)
+            exit(1);
+        if (pthread_mutex_unlock(&client_info[session_id].mutex)==-1)
+            exit(1);
+    }
+}
+
 void struct_init() {
     for (int i = 0; i != MAX_SESSIONS; i++) {
         client_info[i].session_id = -1;
-        memset(client_info[i].fifo_path, '\0', sizeof(client_info[i].fifo_path));
-        client_info[i].file_descriptor=-1;
+        memset(client_info[i].fifo_path, '\0',
+               sizeof(client_info[i].fifo_path));
+        client_info[i].file_descriptor = -1;
+        client_info[i].count = 0;
+        client_info[i].conscounter = 0;
+        client_info[i].prodcounter = 0;
+        if (pthread_mutex_init(&client_info[i].mutex, NULL) == -1)
+            exit(1);
+        if (pthread_cond_init(&client_info[i].podeConsumir, NULL) == -1)
+            exit(1);
+        if (pthread_cond_init(&client_info[i].podeProduzir, NULL) == -1)
+            exit(1);
+        if (pthread_create(&client_info[i].thread, NULL, consumidor,
+                           &client_info[i].session_id) == -1)
+            exit(1);
     }
 }
 
@@ -34,7 +78,8 @@ int create_session(char *client_path_name, int fd) {
     for (int i = 0; i != MAX_SESSIONS; i++) {
         if (client_info[i].session_id == -1) {
             client_info[i].session_id = i;
-            memcpy(client_info[i].fifo_path, client_path_name, sizeof(client_info[i].fifo_path));
+            memcpy(client_info[i].fifo_path, client_path_name,
+                   sizeof(client_info[i].fifo_path));
             client_info[i].file_descriptor = fd;
             return i;
         }
@@ -46,80 +91,128 @@ int clear_session(int session_id) {
     for (int i = 0; i != MAX_SESSIONS; i++) {
         if (session_id == client_info[i].session_id) {
             client_info[i].session_id = -1;
-            memset(client_info[i].fifo_path, '\0', sizeof(client_info[i].fifo_path));
+            memset(client_info[i].fifo_path, '\0',
+                   sizeof(client_info[i].fifo_path));
             return client_info[i].file_descriptor;
         }
     }
     return -1;
 }
 
-void delete_pipes(int session_id){
-    for (int i=0; i!=MAX_SESSIONS; i++){
-        if (client_info[i].session_id!=-1 && i!=session_id){
+void delete_pipes(int session_id) {
+    for (int i = 0; i != MAX_SESSIONS; i++) {
+        if (client_info[i].session_id != -1 && i != session_id) {
             unlink(client_info[i].fifo_path);
         }
     }
 }
 
-int write_pipe(int session_client){
-    for(int i=0; i<MAX_SESSIONS; i++){
-        if (client_info[i].session_id==session_client){
+int write_pipe(int session_client) {
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        if (client_info[i].session_id == session_client) {
             char client_path[MAX_PATH_SIZE];
             memset(client_path, '\0', MAX_PATH_SIZE);
-            memcpy(client_path, client_info[i].fifo_path, sizeof(client_info[i].fifo_path));
+            memcpy(client_path, client_info[i].fifo_path,
+                   sizeof(client_info[i].fifo_path));
             return client_info[i].file_descriptor;
         }
     }
     return -1;
 }
 
-int read_commands(int fd, void* clientpipename){
-    ssize_t command_bytes_read=0;
-    memset(clientpipename, '\0', sizeof(*clientpipename));
-    command_bytes_read = read(fd, clientpipename, sizeof(clientpipename)-1);
-    if (command_bytes_read==-1)
-        return -1;
-    return 0;
+void read_pipename(int fd, char clientpipename[]) {
+    ssize_t command_bytes_read = 0;
+    memset(clientpipename, '\0', MAX_PATH_SIZE + 1);
+    command_bytes_read = read(fd, clientpipename, MAX_PATH_SIZE);
+    if (command_bytes_read == -1)
+        exit(1);
 }
 
-int server_mount(char const* pipename) {
+void read_sessionid(int fd, char session_id[]) {
+    ssize_t command_bytes_read = 0;
+    memset(session_id, '\0', SIZE_OF_SESSION_ID + 1);
+    command_bytes_read = read(fd, session_id, SIZE_OF_SESSION_ID);
+    if (command_bytes_read == -1)
+        exit(1);
+}
+
+void read_filename(int fd, char filename[]) {
+    ssize_t command_bytes_read = 0;
+    memset(filename, '\0', MAX_FILE_NAME + 1);
+    command_bytes_read = read(fd, filename, MAX_FILE_NAME);
+    if (command_bytes_read == -1)
+        exit(1);
+}
+
+void read_fhandle(int fd, char fhandle[]) {
+    ssize_t command_bytes_read = 0;
+    memset(fhandle, '\0', SIZE_OF_FHANDLE + 1);
+    command_bytes_read = read(fd, fhandle, SIZE_OF_FHANDLE);
+    if (command_bytes_read == -1)
+        exit(1);
+}
+
+void read_size(int fd, char size[]) {
+    ssize_t command_bytes_read = 0;
+    memset(size, '\0', SIZE_OF_LENGTH + 1);
+    command_bytes_read = read(fd, size, SIZE_OF_LENGTH);
+    if (command_bytes_read == -1)
+        exit(1);
+}
+
+void read_buffer(int fd, char buffer[], size_t size) {
+    ssize_t command_bytes_read = 0;
+    memset(buffer, '\0', size + 1);
+    command_bytes_read = read(fd, buffer, size);
+    if (command_bytes_read == -1)
+        exit(1);
+}
+
+void read_flags(int fd, char *flags) {
+    ssize_t command_bytes_read = 0;
+    command_bytes_read = read(fd, flags, 1);
+    if (command_bytes_read == -1)
+        exit(1);
+}
+
+int server_mount(char const *pipename) {
     char client_path_name[MAX_PATH_SIZE];
     memset(client_path_name, '\0', sizeof(client_path_name));
     memcpy(client_path_name, pipename, sizeof(client_path_name));
-    
+
     int fd = open(client_path_name, O_WRONLY);
-    if (fd == -1){
+    if (fd == -1) {
         return -1;
     }
 
     int session_id = create_session(client_path_name, fd);
 
-    if (write(fd, &session_id, sizeof(int)) == -1){
+    if (write(fd, &session_id, sizeof(int)) == -1) {
         return -1;
     }
     return 0;
 }
 
-int server_unmount(char const* session_id) {
+int server_unmount(char const *session_id) {
     int session = atoi(session_id);
     int pipe_to_write = write_pipe(session);
-    int client_return_value=0;
-    if (pipe_to_write==-1)
+    int client_return_value = 0;
+    if (pipe_to_write == -1)
         return -1;
     int return_value = clear_session(session);
-    if (return_value==-1){
-        client_return_value=-1;
+    if (return_value == -1) {
+        client_return_value = -1;
     }
-    if (write(pipe_to_write, &client_return_value, sizeof(int))==-1)
+    if (write(pipe_to_write, &client_return_value, sizeof(int)) == -1)
         return -1;
-    if (return_value!=-1){
-        if (close(return_value)==-1)
+    if (return_value != -1) {
+        if (close(return_value) == -1)
             return -1;
     }
     return 0;
 }
 
-int server_open(char const* session_id, char const* filename, char flags){
+int server_open(char const *session_id, char const *filename, char flags) {
     char file_name[MAX_PATH_SIZE];
     int flag, fd, session_client, pipe_to_write;
 
@@ -129,19 +222,19 @@ int server_open(char const* session_id, char const* filename, char flags){
     flag = flags + '0';
     session_client = atoi(session_id);
     pipe_to_write = write_pipe(session_client);
-    if (pipe_to_write==-1)
+    if (pipe_to_write == -1)
         return -1;
 
     fd = tfs_open(file_name, flag);
-    if (write(pipe_to_write, &fd, sizeof(int))==-1)
+    if (write(pipe_to_write, &fd, sizeof(int)) == -1)
         return -1;
-    if (fd==-1)
+    if (fd == -1)
         return -1;
     return 0;
 }
 
-int server_close(char const* session_id, char const* fhandle){
-    int return_value=0, pipe_to_write;
+int server_close(char const *session_id, char const *fhandle) {
+    int return_value = 0, pipe_to_write;
 
     int int_fh = atoi(fhandle);
     int session_client = atoi(session_id);
@@ -149,18 +242,19 @@ int server_close(char const* session_id, char const* fhandle){
     return_value = tfs_close(int_fh);
 
     pipe_to_write = write_pipe(session_client);
-    if (pipe_to_write==-1)
+    if (pipe_to_write == -1)
         return -1;
 
-    if (write(pipe_to_write, &return_value, sizeof(int))==-1)
+    if (write(pipe_to_write, &return_value, sizeof(int)) == -1)
         return -1;
-    if (return_value==-1)
+    if (return_value == -1)
         return -1;
     return 0;
 }
 
-int server_write(char const* session_client, char const* fhandle, char const* size, char const* buffer){
-    int pipe_to_write=0;
+int server_write(char const *session_client, char const *fhandle,
+                 char const *size, char const *buffer) {
+    int pipe_to_write = 0;
 
     int session_id = atoi(session_client);
     int file_handle = atoi(fhandle);
@@ -169,26 +263,27 @@ int server_write(char const* session_client, char const* fhandle, char const* si
     ssize_t return_value = tfs_write(file_handle, buffer, size_to_write);
 
     pipe_to_write = write_pipe(session_id);
-    if (pipe_to_write==-1)
+    if (pipe_to_write == -1)
         return -1;
 
     int return_int = (int)return_value;
 
-    if (write(pipe_to_write, &return_int, sizeof(int))==-1)
+    if (write(pipe_to_write, &return_int, sizeof(int)) == -1)
         return -1;
-    if (return_int==-1)
+    if (return_int == -1)
         return -1;
     return 0;
 }
 
-int server_read(char const* session_client, char const* fhandle, char const* size){
-    int pipe_to_write=0;
+int server_read(char const *session_client, char const *fhandle,
+                char const *size) {
+    int pipe_to_write = 0;
 
     int session_id = atoi(session_client);
     int size_int = atoi(size);
-    int file_handle = atoi(fhandle); 
+    int file_handle = atoi(fhandle);
 
-    char buffer_to_read[size_int+1];   
+    char buffer_to_read[size_int + 1];
     memset(buffer_to_read, '\0', sizeof(buffer_to_read));
     size_t size_to_read = (size_t)size_int;
 
@@ -198,40 +293,40 @@ int server_read(char const* session_client, char const* fhandle, char const* siz
     sprintf(output, "%04d%s", return_value, buffer_to_read);
 
     pipe_to_write = write_pipe(session_id);
-    if (pipe_to_write==-1)
+    if (pipe_to_write == -1)
         return -1;
 
-    if (write(pipe_to_write, output, sizeof(output)-1)==-1)
+    if (write(pipe_to_write, output, sizeof(output) - 1) == -1)
         return -1;
-    if (return_value==-1)
+    if (return_value == -1)
         return -1;
     return 0;
 }
 
-int server_shutdown(char const* session_client){
-    int pipe_to_write =0;  
+int server_shutdown(char const *session_client) {
+    int pipe_to_write = 0;
     int session_id = atoi(session_client);
 
     delete_pipes(session_id);
     int return_value = tfs_destroy_after_all_closed();
     pipe_to_write = write_pipe(session_id);
-    
-    if (write(pipe_to_write, &return_value, sizeof(int))==-1){
+
+    if (write(pipe_to_write, &return_value, sizeof(int)) == -1) {
         return -1;
     }
-    if (return_value==-1){
+    if (return_value == -1) {
         return -1;
-    }        
+    }
     return 0;
 }
 
 int main(int argc, char **argv) {
     char opcode;
-    char clientpipename[MAX_PATH_SIZE+1];
-    char filename[MAX_FILE_NAME+1];
-    char session_id[SIZE_OF_SESSION_ID+1];
-    char fhandle[SIZE_OF_FHANDLE+1];
-    char size[SIZE_OF_LENGTH+1];
+    char clientpipename[MAX_PATH_SIZE + 1];
+    char filename[MAX_FILE_NAME + 1];
+    char session_id[SIZE_OF_SESSION_ID + 1];
+    char fhandle[SIZE_OF_FHANDLE + 1];
+    char size[SIZE_OF_LENGTH + 1];
     char flags;
 
     tfs_init();
@@ -250,118 +345,84 @@ int main(int argc, char **argv) {
     int fd = open(pipename, O_RDONLY);
     if (fd == -1)
         return -1;
-        
+
     while (1) {
         ssize_t bytes_read = read(fd, &opcode, sizeof(opcode));
-        ssize_t command_bytes_read;
-        if (bytes_read == -1){
+        if (bytes_read == -1) {
             return -1;
         }
         if (bytes_read > 0) {
-            switch (opcode) {
-            case '1':
-                memset(clientpipename, '\0', sizeof(clientpipename));
-                command_bytes_read = read(fd, clientpipename, sizeof(clientpipename)-1);
-                if (command_bytes_read==-1)
-                    return -1;
-                if (server_mount(clientpipename) == -1){
+            if (opcode == '1') {
+                read_pipename(fd, clientpipename);
+                if (server_mount(clientpipename) == -1) {
                     return -1;
                 }
-                break;
-            case '2':
-                memset(session_id, '\0', sizeof(session_id));
-                command_bytes_read = read(fd, session_id, sizeof(session_id)-1);
-                if (command_bytes_read==-1)
-                    return -1;
-                if (server_unmount(session_id) == -1){
+            }
+            if (opcode == '2') {
+                read_sessionid(fd, session_id);
+                if (server_unmount(session_id) == -1) {
                     return -1;
                 }
-                break;
-            case '3':
-                memset(session_id, '\0', sizeof(session_id));
-                memset(filename, '\0', sizeof(filename));
-
-                command_bytes_read = read(fd, session_id, sizeof(session_id)-1);
-                if (command_bytes_read==-1)
-                    return -1;
-                command_bytes_read = read(fd, filename, sizeof(filename)-1);
-                if (command_bytes_read==-1)
-                    return -1;
-                command_bytes_read = read(fd, &flags, sizeof(flags));
-                if (command_bytes_read==-1)
-                    return -1;
-                if (server_open(session_id, filename, flags) == -1){
-                    return -1;
+            }
+            if (opcode == '3' || opcode == '4' || opcode == '5' ||
+                opcode == '6') {
+                read_sessionid(fd, session_id);
+                int session_client = atoi(session_id);
+                if (pthread_mutex_lock(&client_info[session_client].mutex) ==
+                    -1)
+                    exit(1);
+                while (client_info[session_client].count == MAX_TASKS)
+                    pthread_cond_wait(&client_info[session_client].podeProduzir,
+                                      &client_info[session_client].mutex);
+                if (opcode == '3') {
+                    read_filename(fd, filename);
+                    read_flags(fd, &flags);
+                    if (server_open(session_id, filename, flags) == -1) {
+                        return -1;
+                    }
                 }
-                break;
-            case '4':
-                memset(session_id, '\0', sizeof(session_id));
-                memset(fhandle, '\0', sizeof(fhandle));
-                command_bytes_read = read(fd, session_id, sizeof(session_id)-1);
-                if (command_bytes_read==-1)
-                    return -1;
-                command_bytes_read = read(fd, fhandle, sizeof(fhandle)-1);
-                if (command_bytes_read==-1)
-                    return -1;
-                if (server_close(session_id, fhandle) == -1){
-                    return -1;
+                if (opcode == '4') {
+                    read_fhandle(fd, fhandle);
+                    if (server_close(session_id, fhandle) == -1) {
+                        return -1;
+                    }
                 }
-                break;
-            case '5':
-                memset(session_id, '\0', sizeof(session_id));
-                memset(size, '\0', sizeof(size));
-                memset(fhandle, '\0', sizeof(fhandle));
-                command_bytes_read = read(fd, session_id, sizeof(session_id)-1);
-                if (command_bytes_read==-1)
-                    return -1;
-                command_bytes_read = read(fd, fhandle, sizeof(fhandle)-1);
-                if (command_bytes_read==-1)
-                    return -1;
-                command_bytes_read = read(fd, size, sizeof(size)-1);
-                if (command_bytes_read==-1)
-                    return -1;
-                size_t size_of_buffer = (size_t)atoi(size);
-                char* buffer_to_write = (char*)malloc(size_of_buffer+1);
-                memset(buffer_to_write, '\0', sizeof(*buffer_to_write));
-                command_bytes_read = read(fd, buffer_to_write, sizeof(buffer_to_write)-1);
-                if (command_bytes_read==-1)
-                    return -1;
-                if (server_write(session_id, fhandle, size, buffer_to_write) == -1){
-                    return -1;
+                if (opcode == '5') {
+                    read_fhandle(fd, fhandle);
+                    read_size(fd, size);
+                    size_t size_of_buffer = (size_t)atoi(size);
+                    char *buffer_to_write = (char *)malloc(size_of_buffer + 1);
+                    read_buffer(fd, buffer_to_write, size_of_buffer);
+                    if (server_write(session_id, fhandle, size,
+                                     buffer_to_write) == -1) {
+                        return -1;
+                    }
+                    free(buffer_to_write);
                 }
-                free(buffer_to_write);
-                break;
-            case '6':
-                memset(session_id, '\0', sizeof(session_id));
-                memset(size, '\0', sizeof(size));
-                memset(fhandle, '\0', sizeof(fhandle));
-                command_bytes_read = read(fd, session_id, sizeof(session_id)-1);
-                if (command_bytes_read==-1)
-                    return -1;
-                command_bytes_read = read(fd, fhandle, sizeof(fhandle)-1);
-                if (command_bytes_read==-1)
-                    return -1;
-                command_bytes_read = read(fd, size, sizeof(size)-1);
-                if (command_bytes_read==-1)
-                    return -1;
-                if (server_read(session_id, fhandle, size) == -1){
-                    return -1;
+                if (opcode == '6') {
+                    read_fhandle(fd, fhandle);
+                    read_size(fd, size);
+                    if (server_read(session_id, fhandle, size) == -1) {
+                        return -1;
+                    }
                 }
-                break;
-            case '7':
-                memset(session_id, '\0', sizeof(session_id));
-                command_bytes_read = read(fd, session_id, sizeof(session_id)-1);
-                if (command_bytes_read==-1)
-                    return -1;
-                if (server_shutdown(session_id)== 0){
+                client_info[session_client].prodcounter++;
+                if (client_info[session_client].prodcounter == MAX_TASKS)
+                    client_info[session_client].prodcounter = 0;
+                client_info[session_client].count++;
+                if (pthread_cond_signal(
+                        &client_info[session_client].podeConsumir) == -1)
+                    exit(1);
+                if (pthread_mutex_unlock(&client_info[session_client].mutex) ==
+                    -1)
+                    exit(1);
+            }
+            if (opcode == '7') {
+                read_sessionid(fd, session_id);
+                if (server_shutdown(session_id) == 0) {
                     unlink(pipename);
                     return 0;
                 }
-                return -1;
-                break;
-            default:
-                return -1;
-                break;
             }
         }
     }
