@@ -5,8 +5,14 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+
 #define MAX_SESSIONS 20
 #define MAX_PATH_SIZE 40
+
+#define SIZE_OF_SESSION_ID 3
+#define SIZE_OF_LENGTH 4
+#define SIZE_OF_FHANDLE 4
+#define SIZE_OF_FLAGS 1
 
 typedef struct client {
     int session_id;
@@ -67,14 +73,19 @@ int write_pipe(int session_client){
     return -1;
 }
 
-int server_mount(char const* buffer) {
+int read_commands(int fd, void* clientpipename){
+    ssize_t command_bytes_read=0;
+    memset(clientpipename, '\0', sizeof(*clientpipename));
+    command_bytes_read = read(fd, clientpipename, sizeof(clientpipename)-1);
+    if (command_bytes_read==-1)
+        return -1;
+    return 0;
+}
+
+int server_mount(char const* pipename) {
     char client_path_name[MAX_PATH_SIZE];
     memset(client_path_name, '\0', sizeof(client_path_name));
-    int i=0;
-    for (i=2; buffer[i]!='|'; i++){
-        client_path_name[i-2] = buffer[i];
-    }
-    client_path_name[i-2]='\0';
+    memcpy(client_path_name, pipename, sizeof(client_path_name));
     
     int fd = open(client_path_name, O_WRONLY);
     if (fd == -1){
@@ -82,9 +93,6 @@ int server_mount(char const* buffer) {
     }
 
     int session_id = create_session(client_path_name, fd);
-    if (session_id==-1){
-        return -1;
-    }
 
     if (write(fd, &session_id, sizeof(int)) == -1){
         return -1;
@@ -92,20 +100,17 @@ int server_mount(char const* buffer) {
     return 0;
 }
 
-int server_unmount(char const* buffer) {
-    char session_id[sizeof(int)];
-    int i=0;
-    for (i = 2; buffer[i] != '|'; i++) {
-        session_id[i - 2] = buffer[i];
-    }
-    session_id[i-2]='\0';
+int server_unmount(char const* session_id) {
     int session = atoi(session_id);
     int pipe_to_write = write_pipe(session);
+    int client_return_value=0;
+    if (pipe_to_write==-1)
+        return -1;
     int return_value = clear_session(session);
-    if (return_value!=-1){
-        return_value=0;
+    if (return_value==-1){
+        client_return_value=-1;
     }
-    if (write(pipe_to_write, &return_value, sizeof(int))==-1)
+    if (write(pipe_to_write, &client_return_value, sizeof(int))==-1)
         return -1;
     if (return_value!=-1){
         if (close(return_value)==-1)
@@ -114,176 +119,121 @@ int server_unmount(char const* buffer) {
     return 0;
 }
 
-int server_open(char const* buffer){
-    char file_name[MAX_PATH_SIZE], name[MAX_PATH_SIZE], flags[2], session_id[sizeof(int)];
-    int flag, fd, session_client, pipe_to_write, i=0, j=0;
+int server_open(char const* session_id, char const* filename, char flags){
+    char file_name[MAX_PATH_SIZE];
+    int flag, fd, session_client, pipe_to_write;
 
-    memset(name, '\0', sizeof(name));
+    memset(file_name, '\0', sizeof(file_name));
 
-    for (i=2; buffer[i]!='|'; i++){
-        session_id[i-2]=buffer[i];
-    }
-    session_id[i-2]='\0';
-    i++;
-    for (j=0; buffer[i]!='|'; i++, j++){
-        file_name[j]=buffer[i];
-    }
-    file_name[j]='\0';
-    i++;
-    flags[0] = buffer[i];
-    flags[1] = '\0';
-
-    memcpy(name, file_name, sizeof(name));
-    flag = atoi(flags);
+    memcpy(file_name, filename, sizeof(file_name));
+    flag = flags + '0';
     session_client = atoi(session_id);
     pipe_to_write = write_pipe(session_client);
-
-    fd = tfs_open(name, flag);
-    if (write(pipe_to_write, &fd, sizeof(int))==-1)
+    if (pipe_to_write==-1)
         return -1;
 
+    fd = tfs_open(file_name, flag);
+    if (write(pipe_to_write, &fd, sizeof(int))==-1)
+        return -1;
+    if (fd==-1)
+        return -1;
     return 0;
 }
 
-int server_close(char const* buffer){
-    int i=0, j=0, return_value=0, pipe_to_write;
-    char session_client[sizeof(int)];
-    char fhandle[sizeof(int)];
+int server_close(char const* session_id, char const* fhandle){
+    int return_value=0, pipe_to_write;
 
-    for (i=2; buffer[i]!='|'; i++){
-        session_client[i-2]=buffer[i];
-    }
-    session_client[i-2]='\0';
-    i++;
-    for (j=0; buffer[i]!='|'; i++, j++){
-        fhandle[j]=buffer[i];
-    }
-    fhandle[j]='\0';
     int int_fh = atoi(fhandle);
-    int session_id = atoi(session_client);
+    int session_client = atoi(session_id);
 
     return_value = tfs_close(int_fh);
 
-    pipe_to_write = write_pipe(session_id);
+    pipe_to_write = write_pipe(session_client);
+    if (pipe_to_write==-1)
+        return -1;
 
     if (write(pipe_to_write, &return_value, sizeof(int))==-1)
+        return -1;
+    if (return_value==-1)
         return -1;
     return 0;
 }
 
-int server_write(char const* buffer){
-    int i=0, j=0, k=0, a=0, pipe_to_write=0;
-    char session_client[sizeof(int)];
-    char size[sizeof(size_t)];
-    char fhandle[sizeof(int)];
-
-    for (i=2; buffer[i]!='|'; i++){
-        session_client[i-2]=buffer[i];
-    }
-    session_client[i-2]='\0';
-    i++;
-
-    for (j=0; buffer[i]!='|'; i++, j++){
-        fhandle[j]=buffer[i];
-    }
-    fhandle[j]='\0';
-    i++;
-
-    for (k=0; buffer[i]!='|'; i++, k++){
-        size[k]=buffer[i];
-    }
-    size[k]='\0';
-    i++;
+int server_write(char const* session_client, char const* fhandle, char const* size, char const* buffer){
+    int pipe_to_write=0;
 
     int session_id = atoi(session_client);
-    int size_int = atoi(size);
     int file_handle = atoi(fhandle);
+    size_t size_to_write = (size_t)atoi(size);
 
-    char buffer_to_write[size_int];
-    for (a=0; buffer[i]!='|'; i++, a++){
-        buffer_to_write[a]=buffer[i];
-    }
-    buffer_to_write[a]='\0';
-
-    size_t size_to_write = (size_t)size_int;
-
-    ssize_t return_value = tfs_write(file_handle, buffer_to_write, size_to_write);
+    ssize_t return_value = tfs_write(file_handle, buffer, size_to_write);
 
     pipe_to_write = write_pipe(session_id);
+    if (pipe_to_write==-1)
+        return -1;
 
     int return_int = (int)return_value;
 
     if (write(pipe_to_write, &return_int, sizeof(int))==-1)
         return -1;
+    if (return_int==-1)
+        return -1;
     return 0;
 }
 
-int server_read(char const* buffer){
-    int i=0, j=0, k=0, pipe_to_write=0;
-    char session_client[sizeof(int)];
-    char size[sizeof(size_t)];
-    char fhandle[sizeof(int)];
-
-    for (i=2; buffer[i]!='|'; i++){
-        session_client[i-2]=buffer[i];
-    }
-    session_client[i-2]='\0';
-    i++;
-
-    for (j=0; buffer[i]!='|'; i++, j++){
-        fhandle[j]=buffer[i];
-    }
-    fhandle[j]='\0';
-    i++;
-
-    for (k=0; buffer[i]!='|'; i++, k++){
-        size[k]=buffer[i];
-    }
-    size[k]='\0';
+int server_read(char const* session_client, char const* fhandle, char const* size){
+    int pipe_to_write=0;
 
     int session_id = atoi(session_client);
     int size_int = atoi(size);
     int file_handle = atoi(fhandle); 
 
- //safe
-    char buffer_to_read[size_int];   
-
+    char buffer_to_read[size_int+1];   
+    memset(buffer_to_read, '\0', sizeof(buffer_to_read));
     size_t size_to_read = (size_t)size_int;
 
-    ssize_t return_value = tfs_read(file_handle, buffer_to_read, size_to_read);
+    int return_value = (int)tfs_read(file_handle, buffer_to_read, size_to_read);
+    char output[size_to_read + SIZE_OF_LENGTH + 1];
 
-    char output[size_to_read + sizeof(size_to_read)+3];
-
-    sprintf(output, "%ld|%s|", return_value, buffer_to_read);
+    sprintf(output, "%04d%s", return_value, buffer_to_read);
 
     pipe_to_write = write_pipe(session_id);
+    if (pipe_to_write==-1)
+        return -1;
 
-    if (write(pipe_to_write, output, sizeof(output))==-1)
+    if (write(pipe_to_write, output, sizeof(output)-1)==-1)
+        return -1;
+    if (return_value==-1)
         return -1;
     return 0;
 }
 
-int server_shutdown(char const* buffer){
-    int i=0, pipe_to_write =0;
-    char session_client[sizeof(int)];
-    for (i=2; buffer[i]!='|'; i++){
-        session_client[i-2]=buffer[i];
-    }
-    session_client[i-2]='\0';
+int server_shutdown(char const* session_client){
+    int pipe_to_write =0;  
     int session_id = atoi(session_client);
 
     delete_pipes(session_id);
     int return_value = tfs_destroy_after_all_closed();
-
     pipe_to_write = write_pipe(session_id);
-
-    if (write(pipe_to_write, &return_value, sizeof(int))==-1)
+    
+    if (write(pipe_to_write, &return_value, sizeof(int))==-1){
         return -1;
+    }
+    if (return_value==-1){
+        return -1;
+    }        
     return 0;
 }
 
 int main(int argc, char **argv) {
-    char buffer[2048];
+    char opcode;
+    char clientpipename[MAX_PATH_SIZE+1];
+    char filename[MAX_FILE_NAME+1];
+    char session_id[SIZE_OF_SESSION_ID+1];
+    char fhandle[SIZE_OF_FHANDLE+1];
+    char size[SIZE_OF_LENGTH+1];
+    char flags;
+
     tfs_init();
     struct_init();
     if (argc < 2) {
@@ -302,46 +252,108 @@ int main(int argc, char **argv) {
         return -1;
         
     while (1) {
-        memset(buffer, '\0', 2048);
-        ssize_t bytes_read = read(fd, buffer, sizeof(buffer) - 1);
+        ssize_t bytes_read = read(fd, &opcode, sizeof(opcode));
+        ssize_t command_bytes_read;
         if (bytes_read == -1){
             return -1;
         }
         if (bytes_read > 0) {
-            char op_code = buffer[0];
-            switch (op_code) {
+            switch (opcode) {
             case '1':
-                if (server_mount(buffer) == -1){
+                memset(clientpipename, '\0', sizeof(clientpipename));
+                command_bytes_read = read(fd, clientpipename, sizeof(clientpipename)-1);
+                if (command_bytes_read==-1)
+                    return -1;
+                if (server_mount(clientpipename) == -1){
                     return -1;
                 }
                 break;
             case '2':
-                if (server_unmount(buffer) == -1){
+                memset(session_id, '\0', sizeof(session_id));
+                command_bytes_read = read(fd, session_id, sizeof(session_id)-1);
+                if (command_bytes_read==-1)
+                    return -1;
+                if (server_unmount(session_id) == -1){
                     return -1;
                 }
                 break;
             case '3':
-                if (server_open(buffer) == -1){
+                memset(session_id, '\0', sizeof(session_id));
+                memset(filename, '\0', sizeof(filename));
+
+                command_bytes_read = read(fd, session_id, sizeof(session_id)-1);
+                if (command_bytes_read==-1)
+                    return -1;
+                command_bytes_read = read(fd, filename, sizeof(filename)-1);
+                if (command_bytes_read==-1)
+                    return -1;
+                command_bytes_read = read(fd, &flags, sizeof(flags));
+                if (command_bytes_read==-1)
+                    return -1;
+                if (server_open(session_id, filename, flags) == -1){
                     return -1;
                 }
                 break;
             case '4':
-                if (server_close(buffer) == -1){
+                memset(session_id, '\0', sizeof(session_id));
+                memset(fhandle, '\0', sizeof(fhandle));
+                command_bytes_read = read(fd, session_id, sizeof(session_id)-1);
+                if (command_bytes_read==-1)
+                    return -1;
+                command_bytes_read = read(fd, fhandle, sizeof(fhandle)-1);
+                if (command_bytes_read==-1)
+                    return -1;
+                if (server_close(session_id, fhandle) == -1){
                     return -1;
                 }
                 break;
             case '5':
-                if (server_write(buffer) == -1){
+                memset(session_id, '\0', sizeof(session_id));
+                memset(size, '\0', sizeof(size));
+                memset(fhandle, '\0', sizeof(fhandle));
+                command_bytes_read = read(fd, session_id, sizeof(session_id)-1);
+                if (command_bytes_read==-1)
+                    return -1;
+                command_bytes_read = read(fd, fhandle, sizeof(fhandle)-1);
+                if (command_bytes_read==-1)
+                    return -1;
+                command_bytes_read = read(fd, size, sizeof(size)-1);
+                if (command_bytes_read==-1)
+                    return -1;
+                size_t size_of_buffer = (size_t)atoi(size);
+                char* buffer_to_write = (char*)malloc(size_of_buffer+1);
+                memset(buffer_to_write, '\0', sizeof(*buffer_to_write));
+                command_bytes_read = read(fd, buffer_to_write, sizeof(buffer_to_write)-1);
+                if (command_bytes_read==-1)
+                    return -1;
+                if (server_write(session_id, fhandle, size, buffer_to_write) == -1){
                     return -1;
                 }
+                free(buffer_to_write);
                 break;
             case '6':
-                if (server_read(buffer) == -1){
+                memset(session_id, '\0', sizeof(session_id));
+                memset(size, '\0', sizeof(size));
+                memset(fhandle, '\0', sizeof(fhandle));
+                command_bytes_read = read(fd, session_id, sizeof(session_id)-1);
+                if (command_bytes_read==-1)
+                    return -1;
+                command_bytes_read = read(fd, fhandle, sizeof(fhandle)-1);
+                if (command_bytes_read==-1)
+                    return -1;
+                command_bytes_read = read(fd, size, sizeof(size)-1);
+                if (command_bytes_read==-1)
+                    return -1;
+                if (server_read(session_id, fhandle, size) == -1){
                     return -1;
                 }
                 break;
             case '7':
-                if (server_shutdown(buffer)== 0){
+                memset(session_id, '\0', sizeof(session_id));
+                command_bytes_read = read(fd, session_id, sizeof(session_id)-1);
+                if (command_bytes_read==-1)
+                    return -1;
+                if (server_shutdown(session_id)== 0){
                     unlink(pipename);
                     return 0;
                 }

@@ -12,6 +12,10 @@
 #include <string.h>
 
 #define MAX_PATH_SIZE 40
+#define SIZE_OF_SESSION_ID 3
+#define SIZE_OF_LENGTH 4
+#define SIZE_OF_FHANDLE 4
+#define SIZE_OF_FLAGS 1
 
 int file_server_handle;
 int file_client_handle;

@@ -22,11 +22,12 @@ int tfs_mount(char const *client_pipe_path, char const *server_pipe_path) {
 
     file_server_handle = fd_server_path; //copy server fd
 
-    char msg[sizeof(client_path)+sizeof(op_code)+3]; //create buffer
+    char msg[sizeof(client_path)+sizeof(op_code)+1]; //create buffer
     
-    sprintf(msg, "%c|%s|", op_code, client_path);
+    sprintf(msg, "%c", op_code);
+    memcpy(msg+sizeof(op_code), client_path, sizeof(client_path));
 
-    if (write(file_server_handle, msg, sizeof(msg))==-1) //write msg to server fifo
+    if (write(file_server_handle, msg, sizeof(msg)-1)==-1) //write msg to server fifo
         return -1;
 
     int fd_client_path = open(client_path, O_RDONLY); //open client fifo to read
@@ -36,6 +37,8 @@ int tfs_mount(char const *client_pipe_path, char const *server_pipe_path) {
 
     if (read(file_client_handle, &session_client, sizeof(int))==-1) //read session id
         return -1;
+    if (session_client==-1)
+        return -1;
     session_id = session_client; //save session_id
 
     return 0;
@@ -44,12 +47,12 @@ int tfs_mount(char const *client_pipe_path, char const *server_pipe_path) {
 int tfs_unmount() {
     char op_code = TFS_OP_CODE_UNMOUNT+'0';
 
-    char msg[sizeof(op_code)+sizeof(int)+3]; //create msg
+    char msg[sizeof(op_code)+SIZE_OF_SESSION_ID+1]; //create msg
     int return_value;
 
-    sprintf(msg, "%c|%d|", op_code, session_id);
+    sprintf(msg, "%c%03d", op_code, session_id);
 
-    if (write(file_server_handle, msg, sizeof(msg))==-1)
+    if (write(file_server_handle, msg, sizeof(msg)-1)==-1)
         return -1;
     if (read(file_client_handle, &return_value, sizeof(int))==-1)
         return -1;
@@ -73,11 +76,13 @@ int tfs_open(char const*name, int flags){
     memset(file_name, '\0', sizeof(file_name));
     memcpy(file_name, name, sizeof(file_name));
     
-    char msg[sizeof(op_code)+sizeof(int)+strlen(file_name)+sizeof(flags)+5];
+    char msg[sizeof(op_code)+SIZE_OF_SESSION_ID+sizeof(file_name)+SIZE_OF_FLAGS+1];
     
-    sprintf(msg, "%c|%d|%s|%d|", op_code, session_id, file_name, flags);
-    
-    if (write(file_server_handle, msg, sizeof(msg))==-1)
+    sprintf(msg, "%c%03d", op_code, session_id);
+    memcpy(msg+SIZE_OF_SESSION_ID+1, file_name, sizeof(file_name));
+    sprintf(msg+SIZE_OF_SESSION_ID+1+sizeof(file_name), "%d", flags);
+
+    if (write(file_server_handle, msg, sizeof(msg)-1)==-1)
         return -1;
 
     if (read(file_client_handle, &return_value, sizeof(int))==-1)
@@ -90,11 +95,11 @@ int tfs_close(int fhandle){
     int return_value;
     char op_code = TFS_OP_CODE_CLOSE + '0';
 
-    char msg[sizeof(op_code)+sizeof(session_id)+sizeof(fhandle)+4];
+    char msg[sizeof(op_code)+SIZE_OF_SESSION_ID+SIZE_OF_FHANDLE+1];
 
-    sprintf(msg, "%c|%d|%d|", op_code, session_id, fhandle);
+    sprintf(msg, "%c%03d%04d", op_code, session_id, fhandle);
 
-    if (write(file_server_handle, msg, sizeof(msg))==-1)
+    if (write(file_server_handle, msg, sizeof(msg)-1)==-1)
         return -1;
 
     if (read(file_client_handle, &return_value, sizeof(int))==-1)
@@ -108,11 +113,11 @@ ssize_t tfs_write(int fhandle, void const *buffer, size_t len){
     int return_value;
     unsigned int size = (unsigned int)len;
 
-    char msg[sizeof(op_code)+sizeof(session_id)+sizeof(fhandle)+sizeof(len)+size+6];
+    char msg[sizeof(op_code)+SIZE_OF_SESSION_ID+SIZE_OF_FHANDLE+SIZE_OF_LENGTH+size+1];
     
-    sprintf(msg, "%c|%d|%d|%d|%s|", op_code, session_id, fhandle, (int)len, (char*)buffer);
+    sprintf(msg, "%c%03d%04d%04d%s", op_code, session_id, fhandle, (int)len, (char*)buffer);
 
-    if (write(file_server_handle, msg, sizeof(msg))==-1)
+    if (write(file_server_handle, msg, sizeof(msg)-1)==-1)
         return -1;
 
     if (read(file_client_handle, &return_value, sizeof(int))==-1)
@@ -124,28 +129,22 @@ ssize_t tfs_write(int fhandle, void const *buffer, size_t len){
 
 ssize_t tfs_read(int fhandle, void*buffer, size_t len){
     char op_code = TFS_OP_CODE_READ + '0';
-    int i=0;
     unsigned int size = (unsigned int)len;
-    char return_value[sizeof(int)];
+    char return_value[SIZE_OF_LENGTH+1];
 
-    char output[size + sizeof(len)+3];
-    char msg[sizeof(op_code)+sizeof(session_id)+sizeof(fhandle)+sizeof(len)+5];
+    char output[size+1];
+    char msg[sizeof(op_code)+SIZE_OF_SESSION_ID+SIZE_OF_FHANDLE+SIZE_OF_LENGTH+1];
     
-    sprintf(msg, "%c|%d|%d|%d|", op_code, session_id, fhandle, (int)len);
-    if (write(file_server_handle, msg, sizeof(msg))==-1)
+    sprintf(msg, "%c%03d%04d%04d", op_code, session_id, fhandle, (int)len);
+    if (write(file_server_handle, msg, sizeof(msg)-1)==-1)
         return -1;
 
-    if (read(file_client_handle, output, sizeof(output))==-1)
+    if (read(file_client_handle, return_value, sizeof(return_value)-1)==-1)
+        return -1;
+    if (read(file_client_handle, output, sizeof(output)-1)==-1)
         return -1;
 
-    for (i=0; output[i]!='|'; i++){
-        return_value[i]=output[i];
-    }
-    return_value[i]='\0';
-    i++;
-
-    memcpy(buffer, output+i, len);
-
+    memcpy(buffer, output, sizeof(output));
     int return_int = atoi(return_value);
 
     return return_int;
@@ -155,11 +154,11 @@ int tfs_shutdown_after_all_closed(){
     char op_code = TFS_OP_CODE_SHUTDOWN_AFTER_ALL_CLOSED + '0';
     int return_value;
 
-    char msg[sizeof(op_code)+sizeof(session_id)+3];
+    char msg[sizeof(op_code)+SIZE_OF_SESSION_ID+1];
 
-    sprintf(msg, "%c|%d|", op_code, session_id);
+    sprintf(msg, "%c%03d", op_code, session_id);
 
-    if (write(file_server_handle, msg, sizeof(msg))==-1)
+    if (write(file_server_handle, msg, sizeof(msg)-1)==-1)
         return -1;
 
     if (read(file_client_handle, &return_value, sizeof(int))==-1)
