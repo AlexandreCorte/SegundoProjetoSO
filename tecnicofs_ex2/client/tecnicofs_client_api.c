@@ -133,6 +133,7 @@ ssize_t tfs_read(int fhandle, void*buffer, size_t len){
     char return_value[SIZE_OF_LENGTH+1];
 
     char output[size+1];
+    memset(output, '\0', size+1);
     char msg[sizeof(op_code)+SIZE_OF_SESSION_ID+SIZE_OF_FHANDLE+SIZE_OF_LENGTH+1];
     
     sprintf(msg, "%c%03d%04d%04d", op_code, session_id, fhandle, (int)len);
@@ -143,7 +144,6 @@ ssize_t tfs_read(int fhandle, void*buffer, size_t len){
         return -1;
     if (read(file_client_handle, output, sizeof(output)-1)==-1)
         return -1;
-
     memcpy(buffer, output, sizeof(output));
     int return_int = atoi(return_value);
 

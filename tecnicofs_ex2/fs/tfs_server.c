@@ -1,6 +1,7 @@
 #include "operations.h"
 #include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -15,7 +16,7 @@
 #define SIZE_OF_FHANDLE 4
 #define SIZE_OF_LENGTH 4
 #define SIZE_OF_FLAGS 1
-#define MAX_TASKS 5
+#define MAX_TASKS 1
 #define BLOCK_TASK 1200
 
 #define FREE 0
@@ -25,9 +26,7 @@ typedef struct client {
     int session_id;
     char fifo_path[MAX_PATH_SIZE];
     int file_descriptor;
-    int count;       // vai de 0 a 4
-    int prodcounter; // vai de 0 a 4
-    int conscounter; // vai de 0 a 4
+    int count; // 0 ou 1
     pthread_mutex_t mutex;
     pthread_cond_t podeConsumir;
     pthread_cond_t podeProduzir;
@@ -36,8 +35,8 @@ typedef struct client {
     int state;
 } client;
 
+int time_to_shutdown;
 client client_info[MAX_SESSIONS];
-
 
 int create_session(char *client_path_name, int fd) {
     for (int i = 0; i != MAX_SESSIONS; i++) {
@@ -146,25 +145,25 @@ int server_mount(char const *pipename) {
     memcpy(client_path_name, pipename, sizeof(client_path_name));
 
     int fd = open(client_path_name, O_WRONLY);
+    int session_id = 0;
     if (fd == -1) {
-        return -1;
+        session_id=-1;
     }
-
-    int session_id = create_session(client_path_name, fd);
-
+    else{
+        session_id = create_session(client_path_name, fd);
+    }
     if (write(fd, &session_id, sizeof(int)) == -1) {
         return -1;
     }
     return 0;
 }
 
-int server_unmount(char const *session_id) {
-    int session = atoi(session_id);
-    int pipe_to_write = write_pipe(session);
+int server_unmount(int session_id) {
     int client_return_value = 0;
+    int pipe_to_write = write_pipe(session_id);
     if (pipe_to_write == -1)
         return -1;
-    int return_value = clear_session(session);
+    int return_value = clear_session(session_id);
     if (return_value == -1) {
         client_return_value = -1;
     }
@@ -186,13 +185,9 @@ int server_open(int session_id, char const *filename, char flags) {
     memcpy(file_name, filename, sizeof(file_name));
     flag = flags + '0';
     pipe_to_write = write_pipe(session_id);
-    if (pipe_to_write == -1)
-        return -1;
 
     fd = tfs_open(file_name, flag);
     if (write(pipe_to_write, &fd, sizeof(int)) == -1)
-        return -1;
-    if (fd == -1)
         return -1;
     return 0;
 }
@@ -205,18 +200,14 @@ int server_close(int session_id, char const *fhandle) {
     return_value = tfs_close(int_fh);
 
     pipe_to_write = write_pipe(session_id);
-    if (pipe_to_write == -1)
-        return -1;
 
     if (write(pipe_to_write, &return_value, sizeof(int)) == -1)
-        return -1;
-    if (return_value == -1)
         return -1;
     return 0;
 }
 
-int server_write(int session_id, char const *fhandle,
-                 char const *size, char const *buffer) {
+int server_write(int session_id, char const *fhandle, char const *size,
+                 char const *buffer) {
     int pipe_to_write = 0;
 
     int file_handle = atoi(fhandle);
@@ -225,20 +216,15 @@ int server_write(int session_id, char const *fhandle,
     ssize_t return_value = tfs_write(file_handle, buffer, size_to_write);
 
     pipe_to_write = write_pipe(session_id);
-    if (pipe_to_write == -1)
-        return -1;
 
     int return_int = (int)return_value;
 
     if (write(pipe_to_write, &return_int, sizeof(int)) == -1)
         return -1;
-    if (return_int == -1)
-        return -1;
     return 0;
 }
 
-int server_read(int session_id, char const *fhandle,
-                char const *size) {
+int server_read(int session_id, char const *fhandle, char const *size) {
     int pipe_to_write = 0;
     int size_int = atoi(size);
     int file_handle = atoi(fhandle);
@@ -253,28 +239,18 @@ int server_read(int session_id, char const *fhandle,
     sprintf(output, "%04d%s", return_value, buffer_to_read);
 
     pipe_to_write = write_pipe(session_id);
-    if (pipe_to_write == -1)
-        return -1;
-
     if (write(pipe_to_write, output, sizeof(output) - 1) == -1)
-        return -1;
-    if (return_value == -1)
         return -1;
     return 0;
 }
 
-int server_shutdown(char const *session_client) {
+int server_shutdown(int session_id) {
     int pipe_to_write = 0;
-    int session_id = atoi(session_client);
-
-    delete_pipes(session_id);
     int return_value = tfs_destroy_after_all_closed();
+    time_to_shutdown=1;
+    delete_pipes(session_id);
     pipe_to_write = write_pipe(session_id);
-
     if (write(pipe_to_write, &return_value, sizeof(int)) == -1) {
-        return -1;
-    }
-    if (return_value == -1) {
         return -1;
     }
     return 0;
@@ -285,54 +261,70 @@ void *consumidor(void *session) {
     while (1) {
         if (pthread_mutex_lock(&client_info[session_id].mutex) == -1)
             exit(1);
-        while (client_info[session_id].count == 0){
+        while (client_info[session_id].count == 0) {
             if (pthread_cond_wait(&client_info[session_id].podeConsumir,
-                                  &client_info[session_id].mutex)==-1)
-                                exit(1);
+                                  &client_info[session_id].mutex) == -1)
+                exit(1);
         }
-        int offset = client_info[session_id].conscounter * BLOCK_TASK;
         char opcode;
-
-        memcpy(&opcode, client_info[session_id].buffer+offset, SIZE_OF_OPCODE);
-        if (opcode == '3'){
-            char filename[MAX_FILE_NAME+1];
+        memcpy(&opcode, client_info[session_id].buffer, SIZE_OF_OPCODE);
+        if (opcode == '2') {
+            server_unmount(session_id);
+        }
+        if (opcode == '3') {
+            char filename[MAX_FILE_NAME + 1];
             char flags;
-            memset(filename, '\0', MAX_FILE_NAME+1);
-            memcpy(filename, client_info[session_id].buffer+offset+SIZE_OF_OPCODE, MAX_FILE_NAME);
-            memcpy(&flags, client_info[session_id].buffer+offset+SIZE_OF_OPCODE+MAX_FILE_NAME, SIZE_OF_FLAGS);
+            memset(filename, '\0', MAX_FILE_NAME + 1);
+            memcpy(filename, client_info[session_id].buffer + SIZE_OF_OPCODE,
+                   MAX_FILE_NAME);
+            memcpy(&flags,
+                   client_info[session_id].buffer + SIZE_OF_OPCODE +
+                       MAX_FILE_NAME,
+                   SIZE_OF_FLAGS);
             server_open(session_id, filename, flags);
         }
-        if (opcode == '4'){
-            char fhandle[SIZE_OF_FHANDLE+1];
-            memset(fhandle, '\0', SIZE_OF_FHANDLE+1);
-            memcpy(fhandle, client_info[session_id].buffer+offset+SIZE_OF_OPCODE, SIZE_OF_FHANDLE);
+        if (opcode == '4') {
+            char fhandle[SIZE_OF_FHANDLE + 1];
+            memset(fhandle, '\0', SIZE_OF_FHANDLE + 1);
+            memcpy(fhandle, client_info[session_id].buffer + SIZE_OF_OPCODE,
+                   SIZE_OF_FHANDLE);
             server_close(session_id, fhandle);
         }
-        if (opcode == '5'){
-            char fhandle[SIZE_OF_FHANDLE+1];
-            char size[SIZE_OF_LENGTH+1];
-            memset(fhandle, '\0', SIZE_OF_FHANDLE+1);
-            memset(size, '\0', SIZE_OF_LENGTH+1);
-            memcpy(fhandle, client_info[session_id].buffer+offset+SIZE_OF_OPCODE, SIZE_OF_FHANDLE);
-            memcpy(size, client_info[session_id].buffer+offset+SIZE_OF_OPCODE+SIZE_OF_FHANDLE, SIZE_OF_LENGTH);
+        if (opcode == '5') {
+            char fhandle[SIZE_OF_FHANDLE + 1];
+            char size[SIZE_OF_LENGTH + 1];
+            memset(fhandle, '\0', SIZE_OF_FHANDLE + 1);
+            memset(size, '\0', SIZE_OF_LENGTH + 1);
+            memcpy(fhandle, client_info[session_id].buffer + SIZE_OF_OPCODE,
+                   SIZE_OF_FHANDLE);
+            memcpy(size,
+                   client_info[session_id].buffer + SIZE_OF_OPCODE +
+                       SIZE_OF_FHANDLE,
+                   SIZE_OF_LENGTH);
             size_t size_of_buffer = (size_t)atoi(size);
-            char buffer_to_write[size_of_buffer+1];
-            memset(buffer_to_write, '\0', size_of_buffer+1);
-            memcpy(buffer_to_write, client_info[session_id].buffer+offset+SIZE_OF_OPCODE+SIZE_OF_FHANDLE+SIZE_OF_LENGTH, size_of_buffer);
+            char buffer_to_write[size_of_buffer + 1];
+            memset(buffer_to_write, '\0', size_of_buffer + 1);
+            memcpy(buffer_to_write,
+                   client_info[session_id].buffer + SIZE_OF_OPCODE +
+                       SIZE_OF_FHANDLE + SIZE_OF_LENGTH,
+                   size_of_buffer);
             server_write(session_id, fhandle, size, buffer_to_write);
         }
-        if (opcode == '6'){
-            char fhandle[SIZE_OF_FHANDLE+1];
-            char size[SIZE_OF_LENGTH+1];
-            memset(fhandle, '\0', SIZE_OF_FHANDLE+1);
-            memset(size, '\0', SIZE_OF_LENGTH+1);
-            memcpy(fhandle, client_info[session_id].buffer+offset+SIZE_OF_OPCODE, SIZE_OF_FHANDLE);
-            memcpy(size, client_info[session_id].buffer+offset+SIZE_OF_OPCODE+SIZE_OF_FHANDLE, SIZE_OF_LENGTH);
+        if (opcode == '6') {
+            char fhandle[SIZE_OF_FHANDLE + 1];
+            char size[SIZE_OF_LENGTH + 1];
+            memset(fhandle, '\0', SIZE_OF_FHANDLE + 1);
+            memset(size, '\0', SIZE_OF_LENGTH + 1);
+            memcpy(fhandle, client_info[session_id].buffer + SIZE_OF_OPCODE,
+                   SIZE_OF_FHANDLE);
+            memcpy(size,
+                   client_info[session_id].buffer + SIZE_OF_OPCODE +
+                       SIZE_OF_FHANDLE,
+                   SIZE_OF_LENGTH);
             server_read(session_id, fhandle, size);
         }
-        client_info[session_id].conscounter++;
-        if (client_info[session_id].conscounter == MAX_TASKS) {
-            client_info[session_id].conscounter = 0;
+        if (opcode == '7'){
+            server_shutdown(session_id);
         }
         client_info[session_id].count--;
         if (pthread_cond_signal(&client_info[session_id].podeProduzir) == -1)
@@ -343,15 +335,14 @@ void *consumidor(void *session) {
 }
 
 void struct_init() {
+    time_to_shutdown=0;
     for (int i = 0; i != MAX_SESSIONS; i++) {
-        client_info[i].session_id = i;
         client_info[i].state = FREE;
+        client_info[i].session_id = i;
         memset(client_info[i].fifo_path, '\0',
                sizeof(client_info[i].fifo_path));
         client_info[i].file_descriptor = -1;
         client_info[i].count = 0;
-        client_info[i].conscounter = 0;
-        client_info[i].prodcounter = 0;
         if (pthread_mutex_init(&client_info[i].mutex, NULL) == -1)
             exit(1);
         if (pthread_cond_init(&client_info[i].podeConsumir, NULL) == -1)
@@ -372,7 +363,7 @@ int main(int argc, char **argv) {
     char fhandle[SIZE_OF_FHANDLE + 1];
     char size[SIZE_OF_LENGTH + 1];
     char flags;
-
+    signal(SIGPIPE, SIG_IGN);
     tfs_init();
     struct_init();
     if (argc < 2) {
@@ -391,6 +382,10 @@ int main(int argc, char **argv) {
         return -1;
 
     while (1) {
+        if (time_to_shutdown==1){
+                    unlink(pipename);
+                    return 0;
+                }
         ssize_t bytes_read = read(fd, &opcode, sizeof(opcode));
         if (bytes_read == -1) {
             return -1;
@@ -402,40 +397,37 @@ int main(int argc, char **argv) {
                     return -1;
                 }
             }
-            if (opcode == '2') {
-                read_sessionid(fd, session_id);
-                if (server_unmount(session_id) == -1) {
-                    return -1;
-                }
-            }
-            if (opcode == '3' || opcode == '4' || opcode == '5' ||
-                opcode == '6') {
+            if (opcode == '2' || opcode == '3' || opcode == '4' ||
+                opcode == '5' || opcode == '6' || opcode == '7'){
                 read_sessionid(fd, session_id);
                 int session_client = atoi(session_id);
                 if (pthread_mutex_lock(&client_info[session_client].mutex) ==
                     -1)
                     exit(1);
                 while (client_info[session_client].count == MAX_TASKS)
-                    pthread_cond_wait(&client_info[session_client].podeProduzir,
-                                      &client_info[session_client].mutex);
-                int offset =
-                    client_info[session_client].prodcounter * BLOCK_TASK;
+                    if (pthread_cond_wait(&client_info[session_client].podeProduzir,
+                                      &client_info[session_client].mutex)==-1)
+                                      exit(1);
+                if (opcode == '2') {
+                    memcpy(client_info[session_client].buffer, &opcode,
+                           SIZE_OF_OPCODE);
+                }
                 if (opcode == '3') {
                     read_filename(fd, filename);
                     read_flags(fd, &flags);
-                    memcpy(client_info[session_client].buffer + offset, &opcode,
+                    memcpy(client_info[session_client].buffer, &opcode,
                            SIZE_OF_OPCODE);
-                    memcpy(client_info[session_client].buffer + offset + SIZE_OF_OPCODE,
+                    memcpy(client_info[session_client].buffer + SIZE_OF_OPCODE,
                            filename, MAX_FILE_NAME);
-                    memcpy(client_info[session_client].buffer + offset + SIZE_OF_OPCODE +
+                    memcpy(client_info[session_client].buffer + SIZE_OF_OPCODE +
                                MAX_FILE_NAME,
                            &flags, SIZE_OF_FLAGS);
                 }
                 if (opcode == '4') {
                     read_fhandle(fd, fhandle);
-                    memcpy(client_info[session_client].buffer + offset, &opcode,
+                    memcpy(client_info[session_client].buffer, &opcode,
                            SIZE_OF_OPCODE);
-                    memcpy(client_info[session_client].buffer + offset + SIZE_OF_OPCODE,
+                    memcpy(client_info[session_client].buffer + SIZE_OF_OPCODE,
                            fhandle, SIZE_OF_FHANDLE);
                 }
                 if (opcode == '5') {
@@ -444,14 +436,14 @@ int main(int argc, char **argv) {
                     size_t size_of_buffer = (size_t)atoi(size);
                     char *buffer_to_write = (char *)malloc(size_of_buffer + 1);
                     read_buffer(fd, buffer_to_write, size_of_buffer);
-                    memcpy(client_info[session_client].buffer + offset, &opcode,
+                    memcpy(client_info[session_client].buffer, &opcode,
                            SIZE_OF_OPCODE);
-                    memcpy(client_info[session_client].buffer + offset + SIZE_OF_OPCODE,
+                    memcpy(client_info[session_client].buffer + SIZE_OF_OPCODE,
                            fhandle, SIZE_OF_FHANDLE);
-                    memcpy(client_info[session_client].buffer + offset + SIZE_OF_OPCODE+
+                    memcpy(client_info[session_client].buffer + SIZE_OF_OPCODE +
                                SIZE_OF_FHANDLE,
                            size, SIZE_OF_LENGTH);
-                    memcpy(client_info[session_client].buffer + offset + SIZE_OF_OPCODE +
+                    memcpy(client_info[session_client].buffer + SIZE_OF_OPCODE +
                                SIZE_OF_FHANDLE + SIZE_OF_LENGTH,
                            buffer_to_write, size_of_buffer);
                     free(buffer_to_write);
@@ -459,17 +451,18 @@ int main(int argc, char **argv) {
                 if (opcode == '6') {
                     read_fhandle(fd, fhandle);
                     read_size(fd, size);
-                    memcpy(client_info[session_client].buffer + offset, &opcode,
+                    memcpy(client_info[session_client].buffer, &opcode,
                            SIZE_OF_OPCODE);
-                    memcpy(client_info[session_client].buffer + offset + SIZE_OF_OPCODE,
+                    memcpy(client_info[session_client].buffer + SIZE_OF_OPCODE,
                            fhandle, SIZE_OF_FHANDLE);
-                    memcpy(client_info[session_client].buffer + offset + SIZE_OF_OPCODE +
+                    memcpy(client_info[session_client].buffer + SIZE_OF_OPCODE +
                                SIZE_OF_FHANDLE,
                            size, SIZE_OF_LENGTH);
                 }
-                client_info[session_client].prodcounter++;
-                if (client_info[session_client].prodcounter == MAX_TASKS)
-                    client_info[session_client].prodcounter = 0;
+                if (opcode == '7') {
+                    memcpy(client_info[session_client].buffer, &opcode,
+                           SIZE_OF_OPCODE);
+                }
                 client_info[session_client].count++;
                 if (pthread_cond_signal(
                         &client_info[session_client].podeConsumir) == -1)
@@ -477,13 +470,6 @@ int main(int argc, char **argv) {
                 if (pthread_mutex_unlock(&client_info[session_client].mutex) ==
                     -1)
                     exit(1);
-            }
-            if (opcode == '7') {
-                read_sessionid(fd, session_id);
-                if (server_shutdown(session_id) == 0) {
-                    unlink(pipename);
-                    return 0;
-                }
             }
         }
     }
