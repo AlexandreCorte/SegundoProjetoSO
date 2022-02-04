@@ -1,4 +1,5 @@
 #include "operations.h"
+#include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
@@ -63,6 +64,24 @@ int clear_session(int session_id) {
     return -1;
 }
 
+int send_msg(int fd, const void *buffer, size_t size_to_write, int session_id) {
+    while (write(fd, buffer, size_to_write) == -1) {
+        if (errno == EINTR) {
+            continue;
+        } else if (errno == EPIPE) {
+            if (fd != -1) {
+                clear_session(session_id);
+            }
+            return EPIPE;
+
+        } else {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 void delete_pipes(int session_id) {
     for (int i = 0; i != MAX_SESSIONS; i++) {
         if (client_info[i].state == TAKEN && i != session_id) {
@@ -82,6 +101,19 @@ int write_pipe(int session_client) {
         }
     }
     return -1;
+}
+
+int read_msg(int fd, void* buffer, int size_to_read){
+    while (read(fd, buffer, (size_t)size_to_read) == -1) {
+        if (errno == EINTR) {
+            continue;
+        }
+        else{
+            exit(1);
+        }
+    }
+
+    return 0;
 }
 
 void read_pipename(int fd, char clientpipename[]) {
@@ -147,14 +179,12 @@ int server_mount(char const *pipename) {
     int fd = open(client_path_name, O_WRONLY);
     int session_id = 0;
     if (fd == -1) {
-        session_id=-1;
-    }
-    else{
+        session_id = -1;
+    } else {
         session_id = create_session(client_path_name, fd);
     }
-    if (write(fd, &session_id, sizeof(int)) == -1) {
-        return -1;
-    }
+    if (send_msg(fd, &session_id, sizeof(session_id), session_id) == -1)
+        exit(1);
     return 0;
 }
 
@@ -167,8 +197,9 @@ int server_unmount(int session_id) {
     if (return_value == -1) {
         client_return_value = -1;
     }
-    if (write(pipe_to_write, &client_return_value, sizeof(int)) == -1)
-        return -1;
+    if (send_msg(pipe_to_write, &client_return_value,
+                 sizeof(client_return_value), session_id) == -1)
+        exit(1);
     if (return_value != -1) {
         if (close(return_value) == -1)
             return -1;
@@ -187,8 +218,8 @@ int server_open(int session_id, char const *filename, char flags) {
     pipe_to_write = write_pipe(session_id);
 
     fd = tfs_open(file_name, flag);
-    if (write(pipe_to_write, &fd, sizeof(int)) == -1)
-        return -1;
+    if (send_msg(pipe_to_write, &fd, sizeof(fd), session_id) == -1)
+        exit(1);
     return 0;
 }
 
@@ -201,8 +232,9 @@ int server_close(int session_id, char const *fhandle) {
 
     pipe_to_write = write_pipe(session_id);
 
-    if (write(pipe_to_write, &return_value, sizeof(int)) == -1)
-        return -1;
+    if (send_msg(pipe_to_write, &return_value, sizeof(return_value),
+                 session_id) == -1)
+        exit(1);
     return 0;
 }
 
@@ -219,8 +251,9 @@ int server_write(int session_id, char const *fhandle, char const *size,
 
     int return_int = (int)return_value;
 
-    if (write(pipe_to_write, &return_int, sizeof(int)) == -1)
-        return -1;
+    if (send_msg(pipe_to_write, &return_int, sizeof(return_int), session_id) ==
+        -1)
+        exit(1);
     return 0;
 }
 
@@ -239,20 +272,20 @@ int server_read(int session_id, char const *fhandle, char const *size) {
     sprintf(output, "%04d%s", return_value, buffer_to_read);
 
     pipe_to_write = write_pipe(session_id);
-    if (write(pipe_to_write, output, sizeof(output) - 1) == -1)
-        return -1;
+    if (send_msg(pipe_to_write, output, sizeof(output), session_id) == -1)
+        exit(1);
     return 0;
 }
 
 int server_shutdown(int session_id) {
     int pipe_to_write = 0;
     int return_value = tfs_destroy_after_all_closed();
-    time_to_shutdown=1;
+    time_to_shutdown = 1;
     delete_pipes(session_id);
     pipe_to_write = write_pipe(session_id);
-    if (write(pipe_to_write, &return_value, sizeof(int)) == -1) {
-        return -1;
-    }
+    if (send_msg(pipe_to_write, &return_value, sizeof(return_value),
+                 session_id) == -1)
+        exit(1);
     return 0;
 }
 
@@ -323,7 +356,7 @@ void *consumidor(void *session) {
                    SIZE_OF_LENGTH);
             server_read(session_id, fhandle, size);
         }
-        if (opcode == '7'){
+        if (opcode == '7') {
             server_shutdown(session_id);
         }
         client_info[session_id].count--;
@@ -335,7 +368,7 @@ void *consumidor(void *session) {
 }
 
 void struct_init() {
-    time_to_shutdown=0;
+    time_to_shutdown = 0;
     for (int i = 0; i != MAX_SESSIONS; i++) {
         client_info[i].state = FREE;
         client_info[i].session_id = i;
@@ -375,39 +408,50 @@ int main(int argc, char **argv) {
     printf("Starting TecnicoFS server with pipe called %s\n", pipename);
     unlink(pipename);
     if (mkfifo(pipename, 0777) == -1)
-        return -1;
+        exit(1);
 
     int fd = open(pipename, O_RDONLY);
     if (fd == -1)
-        return -1;
+        exit(1);
 
     while (1) {
-        if (time_to_shutdown==1){
-                    unlink(pipename);
-                    return 0;
-                }
+        if (time_to_shutdown == 1) {
+            unlink(pipename);
+            return 0;
+        }
         ssize_t bytes_read = read(fd, &opcode, sizeof(opcode));
         if (bytes_read == -1) {
-            return -1;
+            if (errno == EINTR) {
+                continue;
+            }
+            else{
+                exit(1);
+            }
+        }
+        if (bytes_read == 0){
+            int temp = open(pipename, O_RDONLY);
+            if (temp==-1)
+                exit(1);
+            if (close(fd)==-1)
+                exit(1);
+            fd = temp;
         }
         if (bytes_read > 0) {
             if (opcode == '1') {
                 read_pipename(fd, clientpipename);
-                if (server_mount(clientpipename) == -1) {
-                    return -1;
-                }
+                server_mount(clientpipename);
             }
-            if (opcode == '2' || opcode == '3' || opcode == '4' ||
-                opcode == '5' || opcode == '6' || opcode == '7'){
+            else {
                 read_sessionid(fd, session_id);
                 int session_client = atoi(session_id);
                 if (pthread_mutex_lock(&client_info[session_client].mutex) ==
                     -1)
                     exit(1);
                 while (client_info[session_client].count == MAX_TASKS)
-                    if (pthread_cond_wait(&client_info[session_client].podeProduzir,
-                                      &client_info[session_client].mutex)==-1)
-                                      exit(1);
+                    if (pthread_cond_wait(
+                            &client_info[session_client].podeProduzir,
+                            &client_info[session_client].mutex) == -1)
+                        exit(1);
                 if (opcode == '2') {
                     memcpy(client_info[session_client].buffer, &opcode,
                            SIZE_OF_OPCODE);
