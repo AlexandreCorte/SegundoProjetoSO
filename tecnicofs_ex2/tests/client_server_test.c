@@ -81,7 +81,5 @@ void run_test(char *server_pipe, int client_id) {
 
     assert(tfs_close(f) != -1);
 
-    int a = tfs_unmount();
-    printf("unmount -> %d\n", a);
-    assert(a==0);
+    assert(tfs_unmount()==0);
 }

@@ -41,49 +41,28 @@ client client_info[MAX_SESSIONS];
 int create_session(char *client_path_name, int fd) {
     for (int i = 0; i != MAX_SESSIONS; i++) {
         if (client_info[i].state == FREE) {
+            client_info[i].state = TAKEN;
             memcpy(client_info[i].fifo_path, client_path_name,
                    sizeof(client_info[i].fifo_path));
             client_info[i].file_descriptor = fd;
-            client_info[i].state = TAKEN;
             return i;
         }
     }
     return -1;
 }
 
-int clear_session(int session_id) {
+void clear_session(int session_id) {
     for (int i = 0; i != MAX_SESSIONS; i++) {
-        if (session_id == client_info[i].session_id) {
+        if (session_id == client_info[i].session_id && client_info[session_id].state==TAKEN) {
             client_info[i].state = FREE;
             memset(client_info[i].fifo_path, '\0',
                    sizeof(client_info[i].fifo_path));
-            return client_info[i].file_descriptor;
         }
     }
-    return -1;
 }
 
 int send_msg(int fd, const void *buffer, size_t size_to_write, int session_id) {
     while (write(fd, buffer, size_to_write) == -1) {
-        if (errno == EINTR) {
-            continue;
-        } else if (errno == EPIPE) {
-            if (fd != -1) {
-                clear_session(session_id);
-            }
-            return EPIPE;
-
-        } else {
-            return -1;
-        }
-    }
-
-    return 0;
-}
-
-int send_msg2(int fd, int return_value, int session_id) {
-    printf("%d\n", return_value);
-    while (write(fd, &return_value, sizeof(int)) == -1) {
         if (errno == EINTR) {
             continue;
         } else if (errno == EPIPE) {
@@ -150,7 +129,6 @@ int server_mount(char const *pipename) {
     char client_path_name[MAX_PATH_SIZE];
     memset(client_path_name, '\0', sizeof(client_path_name));
     memcpy(client_path_name, pipename, sizeof(client_path_name));
-
     int fd = open(client_path_name, O_WRONLY);
     int session_id = 0;
     if (fd == -1) {
@@ -168,14 +146,15 @@ int server_unmount(int session_id) {
     int pipe_to_write = write_pipe(session_id);
     if (pipe_to_write == -1)
         return -1;
-    int return_value = clear_session(session_id);
-    if (return_value == -1) {
+    int fd = client_info[session_id].file_descriptor;
+    clear_session(session_id);
+    if (fd == -1) {
         client_return_value = -1;
     }
-    if (send_msg2(pipe_to_write, client_return_value, session_id) == -1)
+    if (send_msg(pipe_to_write, &client_return_value, sizeof(client_return_value), session_id) == -1)
         exit(1);
-    if (return_value != -1) {
-        if (close(return_value) == -1)
+    if (fd != -1) {
+        if (close(fd) == -1)
             return -1;
     }
     return 0;
@@ -265,6 +244,7 @@ int server_shutdown(int session_id) {
 
 void *consumidor(void *session) {
     int session_id = *(int *)session;
+    memset(client_info[session_id].buffer, '\0', sizeof(client_info[session_id].buffer));
     while (1) {
         if (pthread_mutex_lock(&client_info[session_id].mutex) == -1)
             exit(1);

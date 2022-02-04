@@ -24,9 +24,7 @@ int tfs_mount(char const *client_pipe_path, char const *server_pipe_path) {
     int fd_server_path = open(server_path, O_WRONLY); //open server fifo
     if (fd_server_path==-1)
         return -1;
-
     file_server_handle = fd_server_path; //copy server fd
-
     char msg[sizeof(client_path)+sizeof(op_code)+1]; //create buffer
     
     sprintf(msg, "%c", op_code);
@@ -62,14 +60,12 @@ int tfs_unmount() {
         return -1;
     if (read(file_client_handle, &return_value, sizeof(int))==-1)
         return -1;
-    printf("%d\n", return_value);
     if (close(file_client_handle)==-1)
         return -1;
     if (close(file_server_handle)==-1)
         return -1;
     if (unlink(fifo_client_path)==-1)
         return -1;
-    printf("%d\n", return_value);
     if (return_value==0)
         return 0;
     return -1;
