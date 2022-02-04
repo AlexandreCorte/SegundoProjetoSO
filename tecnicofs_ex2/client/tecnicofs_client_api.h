@@ -17,11 +17,6 @@
 #define SIZE_OF_FHANDLE 4
 #define SIZE_OF_FLAGS 1
 
-int file_server_handle;
-int file_client_handle;
-char fifo_client_path[MAX_PATH_SIZE];
-int session_id;
-
 /*
  * Establishes a session with a TecnicoFS server.
  * Input:

@@ -1,5 +1,10 @@
 #include "tecnicofs_client_api.h"
 
+int file_server_handle;
+int file_client_handle;
+char fifo_client_path[MAX_PATH_SIZE];
+int session_id;
+
 int tfs_mount(char const *client_pipe_path, char const *server_pipe_path) {
     char client_path[MAX_PATH_SIZE];
     char server_path[MAX_PATH_SIZE];
