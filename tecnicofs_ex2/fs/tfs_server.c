@@ -36,7 +36,6 @@ typedef struct client {
     int state;
 } client;
 
-int time_to_shutdown;
 client client_info[MAX_SESSIONS];
 
 int create_session(char *client_path_name, int fd) {
@@ -82,6 +81,25 @@ int send_msg(int fd, const void *buffer, size_t size_to_write, int session_id) {
     return 0;
 }
 
+int send_msg2(int fd, int return_value, int session_id) {
+    printf("%d\n", return_value);
+    while (write(fd, &return_value, sizeof(int)) == -1) {
+        if (errno == EINTR) {
+            continue;
+        } else if (errno == EPIPE) {
+            if (fd != -1) {
+                clear_session(session_id);
+            }
+            return EPIPE;
+
+        } else {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 void delete_pipes(int session_id) {
     for (int i = 0; i != MAX_SESSIONS; i++) {
         if (client_info[i].state == TAKEN && i != session_id) {
@@ -103,7 +121,7 @@ int write_pipe(int session_client) {
     return -1;
 }
 
-int read_msg(int fd, void* buffer, int size_to_read){
+void read_msg(int fd, void* buffer, int size_to_read){
     while (read(fd, buffer, (size_t)size_to_read) == -1) {
         if (errno == EINTR) {
             continue;
@@ -112,63 +130,20 @@ int read_msg(int fd, void* buffer, int size_to_read){
             exit(1);
         }
     }
-
-    return 0;
 }
 
-void read_pipename(int fd, char clientpipename[]) {
-    ssize_t command_bytes_read = 0;
-    memset(clientpipename, '\0', MAX_PATH_SIZE + 1);
-    command_bytes_read = read(fd, clientpipename, MAX_PATH_SIZE);
-    if (command_bytes_read == -1)
-        exit(1);
-}
-
-void read_sessionid(int fd, char session_id[]) {
-    ssize_t command_bytes_read = 0;
-    memset(session_id, '\0', SIZE_OF_SESSION_ID + 1);
-    command_bytes_read = read(fd, session_id, SIZE_OF_SESSION_ID);
-    if (command_bytes_read == -1)
-        exit(1);
-}
-
-void read_filename(int fd, char filename[]) {
-    ssize_t command_bytes_read = 0;
-    memset(filename, '\0', MAX_FILE_NAME + 1);
-    command_bytes_read = read(fd, filename, MAX_FILE_NAME);
-    if (command_bytes_read == -1)
-        exit(1);
-}
-
-void read_fhandle(int fd, char fhandle[]) {
-    ssize_t command_bytes_read = 0;
-    memset(fhandle, '\0', SIZE_OF_FHANDLE + 1);
-    command_bytes_read = read(fd, fhandle, SIZE_OF_FHANDLE);
-    if (command_bytes_read == -1)
-        exit(1);
-}
-
-void read_size(int fd, char size[]) {
-    ssize_t command_bytes_read = 0;
-    memset(size, '\0', SIZE_OF_LENGTH + 1);
-    command_bytes_read = read(fd, size, SIZE_OF_LENGTH);
-    if (command_bytes_read == -1)
-        exit(1);
+void read_commands(int fd, char buffer[], int size){
+    memset(buffer, '\0', (size_t)size+1);
+    read_msg(fd, buffer, size);
 }
 
 void read_buffer(int fd, char buffer[], size_t size) {
-    ssize_t command_bytes_read = 0;
     memset(buffer, '\0', size + 1);
-    command_bytes_read = read(fd, buffer, size);
-    if (command_bytes_read == -1)
-        exit(1);
+    read_msg(fd, buffer, (int)size);
 }
 
 void read_flags(int fd, char *flags) {
-    ssize_t command_bytes_read = 0;
-    command_bytes_read = read(fd, flags, SIZE_OF_FLAGS);
-    if (command_bytes_read == -1)
-        exit(1);
+    read_msg(fd, flags, SIZE_OF_FLAGS);
 }
 
 int server_mount(char const *pipename) {
@@ -197,8 +172,7 @@ int server_unmount(int session_id) {
     if (return_value == -1) {
         client_return_value = -1;
     }
-    if (send_msg(pipe_to_write, &client_return_value,
-                 sizeof(client_return_value), session_id) == -1)
+    if (send_msg2(pipe_to_write, client_return_value, session_id) == -1)
         exit(1);
     if (return_value != -1) {
         if (close(return_value) == -1)
@@ -268,6 +242,7 @@ int server_read(int session_id, char const *fhandle, char const *size) {
 
     int return_value = (int)tfs_read(file_handle, buffer_to_read, size_to_read);
     char output[size_to_read + SIZE_OF_LENGTH + 1];
+    memset(output, '\0', sizeof(output));
 
     sprintf(output, "%04d%s", return_value, buffer_to_read);
 
@@ -280,7 +255,6 @@ int server_read(int session_id, char const *fhandle, char const *size) {
 int server_shutdown(int session_id) {
     int pipe_to_write = 0;
     int return_value = tfs_destroy_after_all_closed();
-    time_to_shutdown = 1;
     delete_pipes(session_id);
     pipe_to_write = write_pipe(session_id);
     if (send_msg(pipe_to_write, &return_value, sizeof(return_value),
@@ -358,6 +332,7 @@ void *consumidor(void *session) {
         }
         if (opcode == '7') {
             server_shutdown(session_id);
+            exit(1);
         }
         client_info[session_id].count--;
         if (pthread_cond_signal(&client_info[session_id].podeProduzir) == -1)
@@ -368,7 +343,6 @@ void *consumidor(void *session) {
 }
 
 void struct_init() {
-    time_to_shutdown = 0;
     for (int i = 0; i != MAX_SESSIONS; i++) {
         client_info[i].state = FREE;
         client_info[i].session_id = i;
@@ -407,7 +381,7 @@ int main(int argc, char **argv) {
     char *pipename = argv[1];
     printf("Starting TecnicoFS server with pipe called %s\n", pipename);
     unlink(pipename);
-    if (mkfifo(pipename, 0777) == -1)
+    if (mkfifo(pipename, 0640) == -1)
         exit(1);
 
     int fd = open(pipename, O_RDONLY);
@@ -415,10 +389,6 @@ int main(int argc, char **argv) {
         exit(1);
 
     while (1) {
-        if (time_to_shutdown == 1) {
-            unlink(pipename);
-            return 0;
-        }
         ssize_t bytes_read = read(fd, &opcode, sizeof(opcode));
         if (bytes_read == -1) {
             if (errno == EINTR) {
@@ -438,11 +408,11 @@ int main(int argc, char **argv) {
         }
         if (bytes_read > 0) {
             if (opcode == '1') {
-                read_pipename(fd, clientpipename);
+                read_commands(fd, clientpipename, MAX_PATH_SIZE);
                 server_mount(clientpipename);
             }
             else {
-                read_sessionid(fd, session_id);
+                read_commands(fd, session_id, SIZE_OF_SESSION_ID);
                 int session_client = atoi(session_id);
                 if (pthread_mutex_lock(&client_info[session_client].mutex) ==
                     -1)
@@ -457,7 +427,7 @@ int main(int argc, char **argv) {
                            SIZE_OF_OPCODE);
                 }
                 if (opcode == '3') {
-                    read_filename(fd, filename);
+                    read_commands(fd, filename, MAX_FILE_NAME);
                     read_flags(fd, &flags);
                     memcpy(client_info[session_client].buffer, &opcode,
                            SIZE_OF_OPCODE);
@@ -468,17 +438,18 @@ int main(int argc, char **argv) {
                            &flags, SIZE_OF_FLAGS);
                 }
                 if (opcode == '4') {
-                    read_fhandle(fd, fhandle);
+                    read_commands(fd, fhandle, SIZE_OF_FHANDLE);
                     memcpy(client_info[session_client].buffer, &opcode,
                            SIZE_OF_OPCODE);
                     memcpy(client_info[session_client].buffer + SIZE_OF_OPCODE,
                            fhandle, SIZE_OF_FHANDLE);
                 }
                 if (opcode == '5') {
-                    read_fhandle(fd, fhandle);
-                    read_size(fd, size);
+                    read_commands(fd, fhandle, SIZE_OF_FHANDLE);
+                    read_commands(fd, size, SIZE_OF_LENGTH);
                     size_t size_of_buffer = (size_t)atoi(size);
                     char *buffer_to_write = (char *)malloc(size_of_buffer + 1);
+                    memset(buffer_to_write, '\0', size_of_buffer+1);
                     read_buffer(fd, buffer_to_write, size_of_buffer);
                     memcpy(client_info[session_client].buffer, &opcode,
                            SIZE_OF_OPCODE);
@@ -493,8 +464,8 @@ int main(int argc, char **argv) {
                     free(buffer_to_write);
                 }
                 if (opcode == '6') {
-                    read_fhandle(fd, fhandle);
-                    read_size(fd, size);
+                    read_commands(fd, fhandle, SIZE_OF_FHANDLE);
+                    read_commands(fd, size, SIZE_OF_LENGTH);
                     memcpy(client_info[session_client].buffer, &opcode,
                            SIZE_OF_OPCODE);
                     memcpy(client_info[session_client].buffer + SIZE_OF_OPCODE,

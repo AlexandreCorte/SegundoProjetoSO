@@ -18,7 +18,7 @@ int tfs_mount(char const *client_pipe_path, char const *server_pipe_path) {
     memcpy(fifo_client_path, client_pipe_path, sizeof(fifo_client_path)); //save client fifo path
 
     unlink(client_path);
-    if (mkfifo(client_path, 0777)==-1) //create client fifo
+    if (mkfifo(client_path, 0640)==-1) //create client fifo
         return -1;
 
     int fd_server_path = open(server_path, O_WRONLY); //open server fifo
@@ -53,6 +53,7 @@ int tfs_unmount() {
     char op_code = TFS_OP_CODE_UNMOUNT+'0';
 
     char msg[sizeof(op_code)+SIZE_OF_SESSION_ID+1]; //create msg
+    memset(msg, '\0', sizeof(msg));
     int return_value;
 
     sprintf(msg, "%c%03d", op_code, session_id);
@@ -61,13 +62,14 @@ int tfs_unmount() {
         return -1;
     if (read(file_client_handle, &return_value, sizeof(int))==-1)
         return -1;
+    printf("%d\n", return_value);
     if (close(file_client_handle)==-1)
         return -1;
     if (close(file_server_handle)==-1)
         return -1;
     if (unlink(fifo_client_path)==-1)
         return -1;
-
+    printf("%d\n", return_value);
     if (return_value==0)
         return 0;
     return -1;
@@ -136,7 +138,7 @@ ssize_t tfs_read(int fhandle, void*buffer, size_t len){
     char op_code = TFS_OP_CODE_READ + '0';
     unsigned int size = (unsigned int)len;
     char return_value[SIZE_OF_LENGTH+1];
-
+    
     char output[size+1];
     memset(output, '\0', size+1);
     char msg[sizeof(op_code)+SIZE_OF_SESSION_ID+SIZE_OF_FHANDLE+SIZE_OF_LENGTH+1];
@@ -149,7 +151,7 @@ ssize_t tfs_read(int fhandle, void*buffer, size_t len){
         return -1;
     if (read(file_client_handle, output, sizeof(output)-1)==-1)
         return -1;
-    memcpy(buffer, output, sizeof(output));
+    memcpy(buffer, output, sizeof(output)-1);
     int return_int = atoi(return_value);
 
     return return_int;
